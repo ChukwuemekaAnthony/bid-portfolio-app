@@ -247,6 +247,8 @@ function App() {
       const saved = sessionStorage.getItem("gtoken");
       if (saved) {
         window.gapi.client.setToken({ access_token: saved });
+        setAccessToken(saved);
+        setAuthState("authenticated");
         loadBids(saved);
       }
     });
@@ -413,6 +415,13 @@ function App() {
   const lbl = { fontSize: 11, color: "#64748b", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", letterSpacing: 1, marginBottom: 4, display: "block" };
 
   // ── Auth screens ──
+  // Re-check session on every render in case of timing issue
+  const savedToken = sessionStorage.getItem("gtoken");
+  if (authState !== "authenticated" && savedToken) {
+    setAuthState("authenticated");
+    return null;
+  }
+
   if (authState === "idle" || authState === "signing-in" || authState === "error") {
     return <LoginScreen onSignIn={handleSignIn} error={authError} />;
   }
