@@ -34,7 +34,7 @@ const { useState, useMemo, useEffect, useCallback } = React;
 // ═══════════════════════════════════════════════
 const GOOGLE_CLIENT_ID = "694334131194-ega0ikjnhda4ok5ua42s4h9jpann5u5f.apps.googleusercontent.com";
 const SHEET_ID = "1CbbkP_xZozdlgWBxXM1BMBak3LEuFtKgBvNxrv0okUc";
-const SHEET_RANGE = "'Bid Portfolio Master'!A:O";
+const SHEET_RANGE = "BidPortfolio!A:O";
 // ═══════════════════════════════════════════════
 
 const SCOPES = "https://www.googleapis.com/auth/spreadsheets";
@@ -305,7 +305,7 @@ function App() {
     setLoading(true);
     try {
       const resp = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${SHEET_RANGE.replace(/ /g, "%20")}`,
+        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${SHEET_RANGE}`,
         { headers: { Authorization: `Bearer ${token || accessToken}` } }
       );
       const data = await resp.json();
@@ -329,7 +329,7 @@ function App() {
     try {
       const row = bidToRow(bid);
       await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${SHEET_RANGE.replace(/ /g, "%20")}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${SHEET_RANGE}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
         {
           method: "POST",
           headers: {
