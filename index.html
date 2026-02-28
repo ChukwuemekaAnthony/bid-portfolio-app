@@ -295,14 +295,14 @@ function App() {
     setLoading(true);
     try {
       const resp = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(SHEET_RANGE)}`,
+        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${SHEET_RANGE}`,
         { headers: { Authorization: `Bearer ${token || accessToken}` } }
       );
       const data = await resp.json();
       if (data.error) throw new Error(data.error.message);
       const rows = data.values || [];
       // Skip header row (row 1)
-      const loaded = rows.slice(1).map(rowToBid).filter(Boolean).filter(b => b.id);
+      const loaded = rows.slice(1).map((row, i) => { const b = rowToBid(row); if (b) b._rowIndex = i + 2; return b; }).filter(Boolean).filter(b => b.id);
       setBids(loaded);
     } catch (e) {
       console.error("Load error:", e);
@@ -319,7 +319,7 @@ function App() {
     try {
       const row = bidToRow(bid);
       await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(SHEET_RANGE)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${SHEET_RANGE}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
         {
           method: "POST",
           headers: {
@@ -338,6 +338,29 @@ function App() {
       setSaving(false);
     }
   }
+
+  // ── Update existing bid in Sheet ──
+  async function updateBidInSheet(bid) {
+    if (!bid._rowIndex) return;
+    setSyncStatus("");
+    try {
+      const row = bidToRow(bid);
+      await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/A${bid._rowIndex}:O${bid._rowIndex}?valueInputOption=RAW`,
+        {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ values: [row] })
+        }
+      );
+      setSyncStatus("saved");
+      setTimeout(() => setSyncStatus(""), 3000);
+    } catch (e) {
+      console.error("Update error:", e);
+      setSyncStatus("error");
+    }
+  }
+
 
   // ── Refresh from sheet ──
   async function handleRefresh() {
@@ -601,17 +624,42 @@ function App() {
                                     </div>
                                   ))}
                                 </div>
-                                {b.stage === "Won" && (
-                                  <div style={{ flex: 1, minWidth: 200 }}>
-                                    <div style={{ fontSize: 10, color: "#64748b", fontFamily: "'DM Mono',monospace", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>Mobilisation</div>
-                                    {[["Award Date", fmtDate(b.awardDate)], ["Mob Start", fmtDate(b.mobilisationStart)], ["Go-Live Date", fmtDate(b.goLiveDate)]].map(([k, v]) => (
-                                      <div key={k} style={{ fontSize: 12, marginBottom: 5 }}>
-                                        <span style={{ color: "#64748b" }}>{k}: </span>
-                                        <span style={{ fontFamily: "'DM Mono',monospace", color: "#22c55e" }}>{v}</span>
-                                      </div>
-                                    ))}
+                                <div style={{ flex: 1, minWidth: 220 }}>
+                                  <div style={{ fontSize: 10, color: "#64748b", fontFamily: "'DM Mono',monospace", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>Update Bid</div>
+                                  <div style={{ marginBottom: 10 }}>
+                                    <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>STAGE</div>
+                                    <select
+                                      value={b.stage}
+                                      onClick={e => e.stopPropagation()}
+                                      onChange={e => {
+                                        const updated = { ...b, stage: e.target.value };
+                                        setBids(prev => prev.map(x => x.id === b.id ? updated : x));
+                                        updateBidInSheet(updated);
+                                      }}
+                                      style={{ background: "#1a2030", border: "1px solid #2a3348", borderRadius: 6, color: "#f0f2f8", padding: "6px 10px", fontSize: 12, width: "100%", cursor: "pointer" }}>
+                                      {["Intake","Qualified","Bid","Won","Lost"].map(s => <option key={s}>{s}</option>)}
+                                    </select>
                                   </div>
-                                )}
+                                  <div style={{ marginBottom: 10 }}>
+                                    <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>AWARD DATE</div>
+                                    <input
+                                      type="date"
+                                      value={b.awardDate || ""}
+                                      onClick={e => e.stopPropagation()}
+                                      onChange={e => {
+                                        const updated = { ...b, awardDate: e.target.value };
+                                        setBids(prev => prev.map(x => x.id === b.id ? updated : x));
+                                        updateBidInSheet(updated);
+                                      }}
+                                      style={{ background: "#1a2030", border: "1px solid #2a3348", borderRadius: 6, color: "#f0f2f8", padding: "6px 10px", fontSize: 12, width: "100%", colorScheme: "dark", cursor: "pointer" }} />
+                                  </div>
+                                  {b.stage === "Won" && b.mobilisationStart && (
+                                    <div>
+                                      <div style={{ fontSize: 11, color: "#4be8a0", marginBottom: 2 }}>Mob Start: {fmtDate(b.mobilisationStart)}</div>
+                                      <div style={{ fontSize: 11, color: "#4be8a0" }}>Go-Live: {fmtDate(b.goLiveDate)}</div>
+                                    </div>
+                                  )}
+                                </div>
                                 {b.flags.length > 0 && (
                                   <div style={{ flex: 1, minWidth: 180 }}>
                                     <div style={{ fontSize: 10, color: "#f59e0b", fontFamily: "'DM Mono',monospace", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>⚠ Decision Flags</div>
@@ -657,7 +705,6 @@ function App() {
                 { key: "decisionOwner", label: "Decision Owner", type: "text" },
                 { key: "compliance", label: "Compliance", type: "select", opts: COMPLIANCE_OPTS },
                 { key: "bidStart", label: "Bid Start Date", type: "date" },
-                { key: "awardDate", label: "Award Date (Won bids only)", type: "date" },
                 { key: "bidDurationWeeks", label: "Bid Duration (Weeks)", type: "number" },
                 { key: "contractValue", label: "Est. Contract Value (£)", type: "number" },
                 { key: "winProb", label: "Win Probability (%)", type: "number" },
