@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>First Bus — Bid Portfolio 2026–2030</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://apis.google.com/js/api.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body, #root { height: 100%; }
+  body { background: #0b0e15; color: #e2e8f0; font-family: 'Syne', sans-serif; }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: #141820; }
+  ::-webkit-scrollbar-thumb { background: #2a3148; border-radius: 3px; }
+  select, input, button { outline: none; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useMemo, useEffect, useCallback } = React;
+
+// ═══════════════════════════════════════════════
+// ⚙️  CONFIGURATION — REPLACE THESE TWO VALUES
+// ═══════════════════════════════════════════════
+const GOOGLE_CLIENT_ID = "YOUR_CLIENT_ID_HERE";
+const SHEET_ID = "YOUR_SHEET_ID_HERE";
+const SHEET_NAME = "Bid Portfolio Master";
+const SHEET_RANGE = `${SHEET_NAME}!A:O`;
+// ═══════════════════════════════════════════════
+
+const SCOPES = "https://www.googleapis.com/auth/spreadsheets";
+
+// ── Constants ──
+const BLENDED_RATE = 85;
+const HOURS_PER_LEAD_PER_WEEK = 12;
+const LEADS_PER_BID = 10;
+const TOTAL_LEADS = 20;
+const CONCURRENCY_LIMIT = Math.floor(TOTAL_LEADS / LEADS_PER_BID);
+const MOBILISATION_MONTHS = 9;
+const MIN_MARGIN = 8;
+const MIN_WIN_PROB = 20;
+const MAX_BID_COST_PCT = 5;
+
+const STAGES = ["Intake", "Qualified", "Submitted", "Won", "Lost", "No-Go"];
+const REGIONS = ["North West", "Yorkshire", "West Midlands", "South West", "Scotland", "East Midlands", "South East", "North East"];
+const COMPLIANCE_OPTS = ["Pass", "Fail", "TBC"];
+const VIEWS = ["Dashboard", "Portfolio Grid", "Add Bid"];
+
+const GOColors = { "GO": "#22c55e", "NO-GO": "#ef4444", "REVIEW": "#f59e0b", "WON": "#3b82f6", "LOST": "#6b7280" };
+const StageColors = { Intake: "#a78bfa", Qualified: "#38bdf8", Submitted: "#fb923c", Won: "#22c55e", Lost: "#6b7280", "No-Go": "#ef4444" };
+const CapColor = { OK: "#22c55e", OVER: "#ef4444" };
+
+// ── Helpers ──
+function addWeeks(dateStr, weeks) {
+  const d = new Date(dateStr);
+  d.setDate(d.getDate() + weeks * 7);
+  return d.toISOString().slice(0, 10);
+}
+function addMonths(dateStr, months) {
+  const d = new Date(dateStr);
+  d.setMonth(d.getMonth() + months);
+  return d.toISOString().slice(0, 10);
+}
+function fmtDate(d) {
+  if (!d) return "—";
+  return new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+}
+function fmtCurrency(n) {
+  if (n >= 1e6) return `£${(n / 1e6).toFixed(1)}m`;
+  if (n >= 1e3) return `£${(n / 1e3).toFixed(0)}k`;
+  return `£${n}`;
+}
+function fmtGBP(n) {
+  return new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP", maximumFractionDigits: 0 }).format(n);
+}
+
+// ── Sheet row conversion ──
+// Sheet columns: Bid ID | Authority | Name | Region | Stage | Bid Start | Duration Weeks | Contract Value | Win Prob | Target Margin | Strategic Score | Compliance | Decision Owner | Award Date | Notes
+function rowToBid(row) {
+  if (!row || row.length < 3) return null;
+  return {
+    id: row[0] || "",
+    authority: row[1] || "",
+    name: row[2] || "",
+    region: row[3] || "",
+    stage: row[4] || "Intake",
+    bidStart: row[5] || new Date().toISOString().slice(0, 10),
+    bidDurationWeeks: Number(row[6]) || 20,
+    contractValue: Number(row[7]) || 0,
+    winProb: Number(row[8]) || 0,
+    targetMargin: Number(row[9]) || 0,
+    strategicScore: Number(row[10]) || 3,
+    compliance: row[11] || "Pass",
+    decisionOwner: row[12] || "",
+    awardDate: row[13] || "",
+    notes: row[14] || "",
+  };
+}
+
+function bidToRow(bid) {
+  return [
+    bid.id, bid.authority, bid.name, bid.region, bid.stage,
+    bid.bidStart, bid.bidDurationWeeks, bid.contractValue,
+    bid.winProb, bid.targetMargin, bid.strategicScore,
+    bid.compliance, bid.decisionOwner, bid.awardDate || "", bid.notes || ""
+  ];
+}
+
+// ── Calculation engine ──
+function calcBid(bid, allBids) {
+  const bidEnd = addWeeks(bid.bidStart, bid.bidDurationWeeks);
+  const totalHours = LEADS_PER_BID * HOURS_PER_LEAD_PER_WEEK * bid.bidDurationWeeks;
+  const bidPursuitCost = totalHours * BLENDED_RATE;
+  const ev = bid.contractValue * (bid.winProb / 100);
+  const bidCostPct = ev > 0 ? (bidPursuitCost / ev) * 100 : 999;
+
+  const activeStages = ["Intake", "Qualified"];
+  const overlapCount = allBids.filter(b => {
+    if (b.id === bid.id) return false;
+    if (!activeStages.includes(b.stage)) return false;
+    const bEnd = addWeeks(b.bidStart, b.bidDurationWeeks);
+    return b.bidStart <= bidEnd && bEnd >= bid.bidStart;
+  }).length;
+
+  const capacityStatus = activeStages.includes(bid.stage) && overlapCount >= CONCURRENCY_LIMIT ? "OVER" : "OK";
+
+  let goNoGo = "GO";
+  const flags = [];
+  if (bid.compliance === "Fail") { goNoGo = "NO-GO"; flags.push("Compliance fail"); }
+  if (capacityStatus === "OVER") { goNoGo = "NO-GO"; flags.push("Capacity OVER"); }
+  if (bid.targetMargin < MIN_MARGIN) { flags.push(`Margin ${bid.targetMargin}% < ${MIN_MARGIN}%`); if (goNoGo === "GO") goNoGo = "REVIEW"; }
+  if (bid.winProb < MIN_WIN_PROB) { flags.push(`Win prob ${bid.winProb}% < ${MIN_WIN_PROB}%`); if (goNoGo === "GO") goNoGo = "REVIEW"; }
+  if (bidCostPct > MAX_BID_COST_PCT) { flags.push(`Bid cost ${bidCostPct.toFixed(1)}% of EV`); if (goNoGo === "GO") goNoGo = "REVIEW"; }
+  if (bid.compliance === "TBC") { flags.push("Compliance TBC"); if (goNoGo === "GO") goNoGo = "REVIEW"; }
+  if (bid.stage === "Won") goNoGo = "WON";
+  else if (bid.stage === "Lost") goNoGo = "LOST";
+  else if (bid.stage === "No-Go") goNoGo = "NO-GO";
+
+  const mobilisationStart = bid.stage === "Won" ? (bid.awardDate || bidEnd) : null;
+  const goLiveDate = mobilisationStart ? addMonths(mobilisationStart, MOBILISATION_MONTHS) : null;
+
+  return { ...bid, bidEnd, totalHours, bidPursuitCost, ev, bidCostPct, overlapCount, capacityStatus, goNoGo, flags, mobilisationStart, goLiveDate };
+}
+
+// ── Shared UI components ──
+function Badge({ label, color, small }) {
+  return (
+    <span style={{
+      background: color + "22", color, border: `1px solid ${color}55`,
+      borderRadius: 4, padding: small ? "1px 6px" : "2px 8px",
+      fontSize: small ? 10 : 11, fontFamily: "'DM Mono', monospace",
+      fontWeight: 500, whiteSpace: "nowrap", display: "inline-block"
+    }}>{label}</span>
+  );
+}
+
+function KpiCard({ label, value, sub, color }) {
+  return (
+    <div style={{ background: "#141820", border: "1px solid #1e2535", borderRadius: 10, padding: "20px 24px", flex: 1, minWidth: 140 }}>
+      <div style={{ fontSize: 11, color: "#64748b", fontFamily: "'DM Mono',monospace", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>{label}</div>
+      <div style={{ fontSize: 26, fontWeight: 800, color: color || "#e2e8f0", lineHeight: 1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: "#64748b", marginTop: 6 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function Spinner({ message }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "60vh", gap: 16 }}>
+      <div style={{ width: 40, height: 40, border: "3px solid #1e2535", borderTop: "3px solid #3b82f6", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      <div style={{ color: "#64748b", fontSize: 13, fontFamily: "'DM Mono',monospace" }}>{message}</div>
+    </div>
+  );
+}
+
+// ── Login Screen ──
+function LoginScreen({ onSignIn, error }) {
+  return (
+    <div style={{ minHeight: "100vh", background: "#0b0e15", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ background: "#141820", border: "1px solid #1e2535", borderRadius: 16, padding: "48px 56px", textAlign: "center", maxWidth: 420 }}>
+        <div style={{ width: 52, height: 52, background: "linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, margin: "0 auto 20px" }}>🚌</div>
+        <h1 style={{ fontSize: 22, fontWeight: 800, marginBottom: 8 }}>First Bus</h1>
+        <p style={{ color: "#64748b", fontSize: 13, fontFamily: "'DM Mono',monospace", marginBottom: 32 }}>Bid Portfolio 2026–2030</p>
+        <button
+          onClick={onSignIn}
+          style={{
+            background: "white", color: "#1a1a2e", border: "none", borderRadius: 8,
+            padding: "12px 24px", fontSize: 14, fontWeight: 700, cursor: "pointer",
+            display: "flex", alignItems: "center", gap: 10, margin: "0 auto",
+            fontFamily: "'Syne',sans-serif"
+          }}>
+          <svg width="18" height="18" viewBox="0 0 24 24">
+            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+          </svg>
+          Sign in with Google
+        </button>
+        {error && <p style={{ color: "#ef4444", fontSize: 12, marginTop: 16, fontFamily: "'DM Mono',monospace" }}>{error}</p>}
+        <p style={{ color: "#374151", fontSize: 11, marginTop: 24, fontFamily: "'DM Mono',monospace" }}>Access restricted to authorised users only</p>
+      </div>
+    </div>
+  );
+}
+
+// ── Main App ──
+function App() {
+  const [authState, setAuthState] = useState("idle"); // idle | signing-in | authenticated | error
+  const [authError, setAuthError] = useState("");
+  const [accessToken, setAccessToken] = useState(null);
+  const [userInfo, setUserInfo] = useState(null);
+  const [bids, setBids] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [syncStatus, setSyncStatus] = useState(""); // "", "saved", "error"
+  const [view, setView] = useState("Dashboard");
+  const [selectedBid, setSelectedBid] = useState(null);
+  const [filterStage, setFilterStage] = useState("All");
+  const [filterGNG, setFilterGNG] = useState("All");
+  const [newBid, setNewBid] = useState({
+    authority: "", name: "", region: REGIONS[0], stage: "Intake",
+    bidStart: new Date().toISOString().slice(0, 10), bidDurationWeeks: 20,
+    contractValue: "", winProb: "", targetMargin: "", strategicScore: 3,
+    compliance: "Pass", decisionOwner: "", notes: ""
+  });
+
+  // ── Google Auth ──
+  const tokenClient = React.useRef(null);
+
+  useEffect(() => {
+    // Load gapi
+    window.gapi && window.gapi.load("client", async () => {
+      await window.gapi.client.init({});
+      await window.gapi.client.load("https://sheets.googleapis.com/$discovery/rest?version=v4");
+    });
+  }, []);
+
+  function handleSignIn() {
+    setAuthState("signing-in");
+    setAuthError("");
+
+    if (!tokenClient.current) {
+      tokenClient.current = window.google.accounts.oauth2.initTokenClient({
+        client_id: GOOGLE_CLIENT_ID,
+        scope: SCOPES,
+        callback: async (response) => {
+          if (response.error) {
+            setAuthState("error");
+            setAuthError("Sign in failed. Please try again.");
+            return;
+          }
+          setAccessToken(response.access_token);
+          window.gapi.client.setToken({ access_token: response.access_token });
+
+          // Get user info
+          try {
+            const userResp = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+              headers: { Authorization: `Bearer ${response.access_token}` }
+            });
+            const user = await userResp.json();
+            setUserInfo(user);
+          } catch(e) {}
+
+          setAuthState("authenticated");
+          loadBids(response.access_token);
+        }
+      });
+    }
+    tokenClient.current.requestAccessToken({ prompt: "consent" });
+  }
+
+  function handleSignOut() {
+    if (accessToken) {
+      window.google.accounts.oauth2.revoke(accessToken);
+    }
+    setAccessToken(null);
+    setUserInfo(null);
+    setBids([]);
+    setAuthState("idle");
+  }
+
+  // ── Load bids from Sheet ──
+  async function loadBids(token) {
+    setLoading(true);
+    try {
+      const resp = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(SHEET_RANGE)}`,
+        { headers: { Authorization: `Bearer ${token || accessToken}` } }
+      );
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error.message);
+      const rows = data.values || [];
+      // Skip header row (row 1)
+      const loaded = rows.slice(1).map(rowToBid).filter(Boolean).filter(b => b.id);
+      setBids(loaded);
+    } catch (e) {
+      console.error("Load error:", e);
+      setSyncStatus("error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // ── Save new bid to Sheet ──
+  async function appendBid(bid) {
+    setSaving(true);
+    setSyncStatus("");
+    try {
+      const row = bidToRow(bid);
+      await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(SHEET_RANGE)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ values: [row] })
+        }
+      );
+      setSyncStatus("saved");
+      setTimeout(() => setSyncStatus(""), 3000);
+    } catch (e) {
+      console.error("Save error:", e);
+      setSyncStatus("error");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // ── Refresh from sheet ──
+  async function handleRefresh() {
+    await loadBids();
+    setSyncStatus("saved");
+    setTimeout(() => setSyncStatus(""), 2000);
+  }
+
+  const computed = useMemo(() => bids.map(b => calcBid(b, bids)), [bids]);
+  const active = computed.filter(b => ["Intake", "Qualified"].includes(b.stage));
+  const totalPursuitCost = computed.filter(b => !["Won","Lost","No-Go"].includes(b.stage)).reduce((s, b) => s + b.bidPursuitCost, 0);
+  const totalEV = computed.reduce((s, b) => s + b.ev, 0);
+  const overCapacity = computed.filter(b => b.capacityStatus === "OVER");
+  const needsDecision = computed.filter(b => b.goNoGo === "REVIEW");
+
+  const filtered = computed.filter(b => {
+    if (filterStage !== "All" && b.stage !== filterStage) return false;
+    if (filterGNG !== "All" && b.goNoGo !== filterGNG) return false;
+    return true;
+  });
+
+  async function handleAddBid() {
+    const id = `BID-${String(bids.length + 1).padStart(3, "0")}`;
+    const fullBid = {
+      ...newBid, id,
+      contractValue: Number(newBid.contractValue),
+      winProb: Number(newBid.winProb),
+      targetMargin: Number(newBid.targetMargin),
+      bidDurationWeeks: Number(newBid.bidDurationWeeks)
+    };
+    setBids(prev => [...prev, fullBid]);
+    await appendBid(fullBid);
+    setNewBid({ authority: "", name: "", region: REGIONS[0], stage: "Intake", bidStart: new Date().toISOString().slice(0, 10), bidDurationWeeks: 20, contractValue: "", winProb: "", targetMargin: "", strategicScore: 3, compliance: "Pass", decisionOwner: "", notes: "" });
+    setView("Portfolio Grid");
+  }
+
+  const inp = (extra = {}) => ({
+    background: "#0b0e15", border: "1px solid #1e2535", color: "#e2e8f0",
+    borderRadius: 6, padding: "8px 12px", fontSize: 13,
+    fontFamily: "'Syne',sans-serif", width: "100%", ...extra
+  });
+  const lbl = { fontSize: 11, color: "#64748b", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", letterSpacing: 1, marginBottom: 4, display: "block" };
+
+  // ── Auth screens ──
+  if (authState === "idle" || authState === "signing-in" || authState === "error") {
+    return <LoginScreen onSignIn={handleSignIn} error={authError} />;
+  }
+
+  if (loading) return <Spinner message="Loading bids from Google Sheets..." />;
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#0b0e15", color: "#e2e8f0" }}>
+
+      {/* Header */}
+      <div style={{ background: "#0f1420", borderBottom: "1px solid #1e2535", padding: "0 32px", display: "flex", alignItems: "center", justifyContent: "space-between", height: 56, position: "sticky", top: 0, zIndex: 100 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 30, height: 30, background: "linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15 }}>🚌</div>
+          <span style={{ fontWeight: 800, fontSize: 15 }}>First Bus</span>
+          <span style={{ color: "#2a3148", fontSize: 18 }}>|</span>
+          <span style={{ color: "#64748b", fontSize: 13 }}>Bid Portfolio 2026–2030</span>
+        </div>
+
+        <div style={{ display: "flex", gap: 4 }}>
+          {VIEWS.map(v => (
+            <button key={v} onClick={() => setView(v)} style={{
+              background: view === v ? "#1e2535" : "transparent",
+              color: view === v ? "#e2e8f0" : "#64748b",
+              border: "none", borderRadius: 6, padding: "6px 16px",
+              fontSize: 13, cursor: "pointer", fontFamily: "'Syne',sans-serif", fontWeight: 600
+            }}>{v}</button>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {/* Sync status */}
+          {saving && <span style={{ fontSize: 11, color: "#f59e0b", fontFamily: "'DM Mono',monospace" }}>⏳ Saving...</span>}
+          {syncStatus === "saved" && <span style={{ fontSize: 11, color: "#22c55e", fontFamily: "'DM Mono',monospace" }}>✓ Synced</span>}
+          {syncStatus === "error" && <span style={{ fontSize: 11, color: "#ef4444", fontFamily: "'DM Mono',monospace" }}>⚠ Sync error</span>}
+
+          {/* Refresh */}
+          <button onClick={handleRefresh} style={{ background: "#1e2535", color: "#94a3b8", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 12, cursor: "pointer", fontFamily: "'DM Mono',monospace" }}>↻ Refresh</button>
+
+          {/* User */}
+          {userInfo && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {userInfo.picture && <img src={userInfo.picture} style={{ width: 26, height: 26, borderRadius: "50%" }} />}
+              <span style={{ fontSize: 12, color: "#64748b" }}>{userInfo.name}</span>
+              <button onClick={handleSignOut} style={{ background: "transparent", color: "#64748b", border: "1px solid #1e2535", borderRadius: 6, padding: "4px 10px", fontSize: 11, cursor: "pointer", fontFamily: "'DM Mono',monospace" }}>Sign out</button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div style={{ padding: "28px 32px", maxWidth: 1400, margin: "0 auto" }}>
+
+        {/* ═══ DASHBOARD ═══ */}
+        {view === "Dashboard" && (
+          <div>
+            <div style={{ marginBottom: 24 }}>
+              <h1 style={{ fontSize: 26, fontWeight: 800, marginBottom: 4 }}>Portfolio Overview</h1>
+              <p style={{ color: "#64748b", fontSize: 13, fontFamily: "'DM Mono',monospace" }}>
+                As at {new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })} · {bids.length} bids · Live from Google Sheets
+              </p>
+            </div>
+
+            {bids.length === 0 && (
+              <div style={{ background: "#141820", border: "1px dashed #1e2535", borderRadius: 10, padding: "40px", textAlign: "center", marginBottom: 24 }}>
+                <div style={{ fontSize: 32, marginBottom: 12 }}>📋</div>
+                <div style={{ fontWeight: 700, marginBottom: 8 }}>No bids yet</div>
+                <div style={{ color: "#64748b", fontSize: 13 }}>Go to Add Bid to enter your first bid, or check your Google Sheet has data.</div>
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 14, marginBottom: 22, flexWrap: "wrap" }}>
+              <KpiCard label="Total Bids" value={bids.length} sub={`${active.length} active pursuits`} />
+              <KpiCard label="Pursuit Cost Exposure" value={fmtCurrency(totalPursuitCost)} sub="Active + qualified" color="#f59e0b" />
+              <KpiCard label="Total Expected Value" value={fmtCurrency(totalEV)} sub="Across all bids" color="#22c55e" />
+              <KpiCard label="Capacity Conflicts" value={overCapacity.length} sub={overCapacity.length ? overCapacity.map(b => b.id).join(", ") : "None"} color={overCapacity.length ? "#ef4444" : "#22c55e"} />
+              <KpiCard label="Decisions Needed" value={needsDecision.length} sub="REVIEW status" color={needsDecision.length ? "#f59e0b" : "#22c55e"} />
+            </div>
+
+            <div style={{ display: "flex", gap: 14, marginBottom: 22, flexWrap: "wrap" }}>
+              {["GO","REVIEW","NO-GO","WON","LOST"].map(g => {
+                const count = computed.filter(b => b.goNoGo === g).length;
+                return (
+                  <div key={g} style={{ background: "#141820", border: `1px solid ${GOColors[g]}44`, borderRadius: 10, padding: "18px 20px", flex: 1, minWidth: 100, textAlign: "center" }}>
+                    <div style={{ fontSize: 34, fontWeight: 800, color: GOColors[g] }}>{count}</div>
+                    <div style={{ fontSize: 11, color: "#64748b", fontFamily: "'DM Mono',monospace", marginTop: 5 }}>{g}</div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Active Pursuits */}
+            <div style={{ background: "#141820", border: "1px solid #1e2535", borderRadius: 10, overflow: "hidden", marginBottom: 20 }}>
+              <div style={{ padding: "14px 20px", borderBottom: "1px solid #1e2535", display: "flex", justifyContent: "space-between" }}>
+                <span style={{ fontWeight: 700, fontSize: 14 }}>Active Pursuits</span>
+                <span style={{ fontSize: 11, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>Intake &amp; Qualified</span>
+              </div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, minWidth: 700 }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid #1e2535" }}>
+                      {["Bid","Opportunity","Region","Due Date","Contract Value","Win Prob","EV","Go/No-Go","Capacity"].map(h => (
+                        <th key={h} style={{ padding: "10px 16px", textAlign: "left", color: "#64748b", fontFamily: "'DM Mono',monospace", fontSize: 10, fontWeight: 500, textTransform: "uppercase", letterSpacing: 1, whiteSpace: "nowrap" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {computed.filter(b => ["Intake","Qualified"].includes(b.stage)).map(b => (
+                      <tr key={b.id}
+                        onClick={() => { setSelectedBid(b); setView("Portfolio Grid"); }}
+                        style={{ borderBottom: "1px solid #1a2030", cursor: "pointer" }}
+                        onMouseEnter={e => e.currentTarget.style.background = "#1a2030"}
+                        onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                        <td style={{ padding: "11px 16px", fontFamily: "'DM Mono',monospace", color: "#64748b", fontSize: 11 }}>{b.id}</td>
+                        <td style={{ padding: "11px 16px", fontWeight: 600 }}>{b.name}</td>
+                        <td style={{ padding: "11px 16px", color: "#94a3b8" }}>{b.region}</td>
+                        <td style={{ padding: "11px 16px", fontFamily: "'DM Mono',monospace", fontSize: 12 }}>{fmtDate(b.bidEnd)}</td>
+                        <td style={{ padding: "11px 16px" }}>{fmtCurrency(b.contractValue)}</td>
+                        <td style={{ padding: "11px 16px" }}>{b.winProb}%</td>
+                        <td style={{ padding: "11px 16px", color: "#22c55e" }}>{fmtCurrency(b.ev)}</td>
+                        <td style={{ padding: "11px 16px" }}><Badge label={b.goNoGo} color={GOColors[b.goNoGo] || "#64748b"} /></td>
+                        <td style={{ padding: "11px 16px" }}><Badge label={b.capacityStatus} color={CapColor[b.capacityStatus]} small /></td>
+                      </tr>
+                    ))}
+                    {computed.filter(b => ["Intake","Qualified"].includes(b.stage)).length === 0 && (
+                      <tr><td colSpan={9} style={{ padding: "20px 16px", color: "#64748b", fontSize: 13 }}>No active pursuits.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Won bids */}
+            <div style={{ background: "#141820", border: "1px solid #1e2535", borderRadius: 10, overflow: "hidden" }}>
+              <div style={{ padding: "14px 20px", borderBottom: "1px solid #1e2535" }}>
+                <span style={{ fontWeight: 700, fontSize: 14 }}>Won Bids — Mobilisation Pipeline</span>
+              </div>
+              {computed.filter(b => b.stage === "Won").length === 0
+                ? <div style={{ padding: "18px 20px", color: "#64748b", fontSize: 13 }}>No won bids yet.</div>
+                : computed.filter(b => b.stage === "Won").map(b => (
+                  <div key={b.id} style={{ padding: "14px 20px", borderBottom: "1px solid #1a2030", display: "flex", gap: 20, alignItems: "center", flexWrap: "wrap" }}>
+                    <Badge label="WON" color={GOColors.WON} />
+                    <span style={{ fontWeight: 600, flex: 1 }}>{b.name}</span>
+                    <span style={{ color: "#64748b", fontSize: 12, fontFamily: "'DM Mono',monospace" }}>Mob Start: {fmtDate(b.mobilisationStart)}</span>
+                    <span style={{ color: "#22c55e", fontSize: 12, fontFamily: "'DM Mono',monospace" }}>Go-Live: {fmtDate(b.goLiveDate)}</span>
+                    <span style={{ fontWeight: 700 }}>{fmtCurrency(b.contractValue)}</span>
+                  </div>
+                ))}
+            </div>
+          </div>
+        )}
+
+        {/* ═══ PORTFOLIO GRID ═══ */}
+        {view === "Portfolio Grid" && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
+              <div>
+                <h1 style={{ fontSize: 22, fontWeight: 800, marginBottom: 4 }}>Portfolio Grid</h1>
+                <p style={{ color: "#64748b", fontSize: 12, fontFamily: "'DM Mono',monospace" }}>{filtered.length} of {bids.length} bids · Click row to expand</p>
+              </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <select value={filterStage} onChange={e => setFilterStage(e.target.value)} style={inp({ width: "auto" })}>
+                  <option value="All">All Stages</option>
+                  {STAGES.map(s => <option key={s}>{s}</option>)}
+                </select>
+                <select value={filterGNG} onChange={e => setFilterGNG(e.target.value)} style={inp({ width: "auto" })}>
+                  <option value="All">All Go/No-Go</option>
+                  {["GO","REVIEW","NO-GO","WON","LOST"].map(g => <option key={g}>{g}</option>)}
+                </select>
+              </div>
+            </div>
+
+            <div style={{ background: "#141820", border: "1px solid #1e2535", borderRadius: 10, overflow: "hidden" }}>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 1000 }}>
+                  <thead>
+                    <tr style={{ background: "#0f1420", borderBottom: "1px solid #1e2535" }}>
+                      {["ID","Opportunity","Authority","Stage","Due Date","Contract Val","Win%","EV","Pursuit Cost","Bid Cost%","Go/No-Go","Cap","Flags"].map(h => (
+                        <th key={h} style={{ padding: "10px 13px", textAlign: "left", color: "#64748b", fontFamily: "'DM Mono',monospace", fontSize: 10, fontWeight: 500, textTransform: "uppercase", letterSpacing: 0.8, whiteSpace: "nowrap" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filtered.map(b => (
+                      <React.Fragment key={b.id}>
+                        <tr
+                          onClick={() => setSelectedBid(selectedBid && selectedBid.id === b.id ? null : b)}
+                          style={{ borderBottom: "1px solid #1a2030", cursor: "pointer", background: selectedBid && selectedBid.id === b.id ? "#1a2535" : "transparent" }}
+                          onMouseEnter={e => { if (!selectedBid || selectedBid.id !== b.id) e.currentTarget.style.background = "#141e2a"; }}
+                          onMouseLeave={e => { if (!selectedBid || selectedBid.id !== b.id) e.currentTarget.style.background = "transparent"; }}>
+                          <td style={{ padding: "11px 13px", fontFamily: "'DM Mono',monospace", color: "#64748b", fontSize: 11 }}>{b.id}</td>
+                          <td style={{ padding: "11px 13px", fontWeight: 600 }}>{b.name}</td>
+                          <td style={{ padding: "11px 13px", color: "#94a3b8" }}>{b.authority}</td>
+                          <td style={{ padding: "11px 13px" }}><Badge label={b.stage} color={StageColors[b.stage] || "#64748b"} small /></td>
+                          <td style={{ padding: "11px 13px", fontFamily: "'DM Mono',monospace" }}>{fmtDate(b.bidEnd)}</td>
+                          <td style={{ padding: "11px 13px" }}>{fmtCurrency(b.contractValue)}</td>
+                          <td style={{ padding: "11px 13px" }}>{b.winProb}%</td>
+                          <td style={{ padding: "11px 13px", color: "#22c55e" }}>{fmtCurrency(b.ev)}</td>
+                          <td style={{ padding: "11px 13px", color: "#f59e0b" }}>{fmtCurrency(b.bidPursuitCost)}</td>
+                          <td style={{ padding: "11px 13px", fontFamily: "'DM Mono',monospace", color: b.bidCostPct > MAX_BID_COST_PCT ? "#ef4444" : "#94a3b8" }}>
+                            {b.bidCostPct > 99 ? "—" : b.bidCostPct.toFixed(1) + "%"}
+                          </td>
+                          <td style={{ padding: "11px 13px" }}><Badge label={b.goNoGo} color={GOColors[b.goNoGo] || "#64748b"} /></td>
+                          <td style={{ padding: "11px 13px" }}><Badge label={b.capacityStatus} color={CapColor[b.capacityStatus]} small /></td>
+                          <td style={{ padding: "11px 13px" }}>
+                            {b.flags.length ? <span style={{ color: "#f59e0b", fontSize: 11 }}>⚠ {b.flags.length}</span> : <span style={{ color: "#374151" }}>—</span>}
+                          </td>
+                        </tr>
+                        {selectedBid && selectedBid.id === b.id && (
+                          <tr>
+                            <td colSpan={13} style={{ background: "#0d1119", borderBottom: "1px solid #1e2535", padding: 0 }}>
+                              <div style={{ padding: "20px 24px", display: "flex", gap: 28, flexWrap: "wrap" }}>
+                                <div style={{ flex: 1, minWidth: 200 }}>
+                                  <div style={{ fontSize: 10, color: "#64748b", fontFamily: "'DM Mono',monospace", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>Bid Details</div>
+                                  {[["Region", b.region], ["Decision Owner", b.decisionOwner || "—"], ["Compliance", b.compliance], ["Strategic Score", `${b.strategicScore} / 5`], ["Total Bid Hours", `${b.totalHours.toLocaleString()} hrs`], ["Blended Rate", `£${BLENDED_RATE}/hr`]].map(([k, v]) => (
+                                    <div key={k} style={{ fontSize: 12, marginBottom: 5 }}>
+                                      <span style={{ color: "#64748b" }}>{k}: </span>
+                                      <span style={{ fontFamily: "'DM Mono',monospace" }}>{v}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                                {b.stage === "Won" && (
+                                  <div style={{ flex: 1, minWidth: 200 }}>
+                                    <div style={{ fontSize: 10, color: "#64748b", fontFamily: "'DM Mono',monospace", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>Mobilisation</div>
+                                    {[["Award Date", fmtDate(b.awardDate)], ["Mob Start", fmtDate(b.mobilisationStart)], ["Go-Live Date", fmtDate(b.goLiveDate)]].map(([k, v]) => (
+                                      <div key={k} style={{ fontSize: 12, marginBottom: 5 }}>
+                                        <span style={{ color: "#64748b" }}>{k}: </span>
+                                        <span style={{ fontFamily: "'DM Mono',monospace", color: "#22c55e" }}>{v}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                {b.flags.length > 0 && (
+                                  <div style={{ flex: 1, minWidth: 180 }}>
+                                    <div style={{ fontSize: 10, color: "#f59e0b", fontFamily: "'DM Mono',monospace", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>⚠ Decision Flags</div>
+                                    {b.flags.map(f => <div key={f} style={{ fontSize: 12, color: "#f59e0b", marginBottom: 5 }}>• {f}</div>)}
+                                  </div>
+                                )}
+                                {b.notes && (
+                                  <div style={{ flex: 2, minWidth: 180 }}>
+                                    <div style={{ fontSize: 10, color: "#64748b", fontFamily: "'DM Mono',monospace", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>Notes</div>
+                                    <div style={{ fontSize: 13, color: "#94a3b8", fontStyle: "italic" }}>{b.notes}</div>
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    ))}
+                    {filtered.length === 0 && (
+                      <tr><td colSpan={13} style={{ padding: "20px 16px", color: "#64748b", fontSize: 13 }}>No bids match your filters.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ═══ ADD BID ═══ */}
+        {view === "Add Bid" && (
+          <div style={{ maxWidth: 760 }}>
+            <h1 style={{ fontSize: 22, fontWeight: 800, marginBottom: 6 }}>Intake — New Bid</h1>
+            <p style={{ color: "#64748b", fontSize: 13, marginBottom: 28, fontFamily: "'DM Mono',monospace" }}>
+              Complete intake fields. Go/No-Go and capacity calculated live. Submitted bids are saved directly to Google Sheets.
+            </p>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, background: "#141820", border: "1px solid #1e2535", borderRadius: 12, padding: 28, marginBottom: 20 }}>
+              {[
+                { key: "name", label: "Opportunity Name", type: "text", full: true },
+                { key: "authority", label: "Authority / Client", type: "text" },
+                { key: "region", label: "Region", type: "select", opts: REGIONS },
+                { key: "stage", label: "Stage", type: "select", opts: STAGES },
+                { key: "decisionOwner", label: "Decision Owner", type: "text" },
+                { key: "compliance", label: "Compliance", type: "select", opts: COMPLIANCE_OPTS },
+                { key: "bidStart", label: "Bid Start Date", type: "date" },
+                { key: "bidDurationWeeks", label: "Bid Duration (Weeks)", type: "number" },
+                { key: "contractValue", label: "Est. Contract Value (£)", type: "number" },
+                { key: "winProb", label: "Win Probability (%)", type: "number" },
+                { key: "targetMargin", label: "Target Margin (%)", type: "number" },
+                { key: "strategicScore", label: "Strategic Score (1–5)", type: "number" },
+                { key: "notes", label: "Notes", type: "text", full: true },
+              ].map(({ key, label, type, opts, full }) => (
+                <div key={key} style={full ? { gridColumn: "1 / -1" } : {}}>
+                  <label style={lbl}>{label}</label>
+                  {type === "select"
+                    ? <select value={newBid[key]} onChange={e => setNewBid(p => ({ ...p, [key]: e.target.value }))} style={inp()}>{opts.map(o => <option key={o}>{o}</option>)}</select>
+                    : <input type={type} value={newBid[key]} onChange={e => setNewBid(p => ({ ...p, [key]: e.target.value }))} style={inp()} />}
+                </div>
+              ))}
+            </div>
+
+            {/* Live preview */}
+            {newBid.contractValue && newBid.winProb && (() => {
+              const preview = calcBid({
+                ...newBid, id: "PREVIEW",
+                contractValue: Number(newBid.contractValue),
+                winProb: Number(newBid.winProb),
+                targetMargin: Number(newBid.targetMargin),
+                bidDurationWeeks: Number(newBid.bidDurationWeeks)
+              }, bids);
+              const gngColor = GOColors[preview.goNoGo] || "#64748b";
+              return (
+                <div style={{ background: "#141820", border: `1px solid ${gngColor}44`, borderRadius: 10, padding: "18px 24px", marginBottom: 20 }}>
+                  <div style={{ fontSize: 10, color: "#64748b", fontFamily: "'DM Mono',monospace", marginBottom: 12, textTransform: "uppercase", letterSpacing: 1 }}>Live Viability Preview</div>
+                  <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "center" }}>
+                    <div>
+                      <div style={{ fontSize: 10, color: "#64748b", marginBottom: 4 }}>OUTCOME</div>
+                      <Badge label={preview.goNoGo} color={gngColor} />
+                    </div>
+                    <div style={{ fontSize: 12 }}><span style={{ color: "#64748b" }}>EV: </span><span style={{ color: "#22c55e", fontFamily: "'DM Mono',monospace" }}>{fmtGBP(preview.ev)}</span></div>
+                    <div style={{ fontSize: 12 }}><span style={{ color: "#64748b" }}>Pursuit Cost: </span><span style={{ color: "#f59e0b", fontFamily: "'DM Mono',monospace" }}>{fmtGBP(preview.bidPursuitCost)}</span></div>
+                    <div style={{ fontSize: 12 }}><span style={{ color: "#64748b" }}>Due: </span><span style={{ fontFamily: "'DM Mono',monospace" }}>{fmtDate(preview.bidEnd)}</span></div>
+                    <div style={{ fontSize: 12 }}><span style={{ color: "#64748b" }}>Capacity: </span><Badge label={preview.capacityStatus} color={CapColor[preview.capacityStatus]} small /></div>
+                    {preview.flags.map(f => <span key={f} style={{ fontSize: 11, color: "#f59e0b" }}>⚠ {f}</span>)}
+                  </div>
+                </div>
+              );
+            })()}
+
+            <button
+              onClick={handleAddBid}
+              disabled={saving}
+              style={{
+                background: saving ? "#1e2535" : "linear-gradient(135deg,#3b82f6,#6366f1)",
+                color: saving ? "#64748b" : "#fff",
+                border: "none", borderRadius: 8, padding: "12px 28px",
+                fontSize: 14, fontWeight: 700, cursor: saving ? "not-allowed" : "pointer",
+                fontFamily: "'Syne',sans-serif"
+              }}>
+              {saving ? "Saving to Google Sheets..." : "Add to Portfolio → Save to Sheet"}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
