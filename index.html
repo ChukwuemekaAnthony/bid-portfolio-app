@@ -249,6 +249,12 @@ function App() {
           window.gapi.client.setToken({ access_token: saved });
           setAccessToken(saved);
           setAuthState("authenticated");
+          // Re-fetch userInfo to restore name/picture
+          fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+            headers: { Authorization: `Bearer ${saved}` }
+          }).then(r => r.json()).then(info => {
+            if (info.name) setUserInfo(info);
+          }).catch(() => {});
           loadBids(saved);
         }
       });
@@ -316,14 +322,22 @@ function App() {
   async function loadBids(token) {
     setLoading(true);
     try {
-      const resp = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${SHEET_RANGE}`,
-        { headers: { Authorization: `Bearer ${token || accessToken}` } }
-      );
+      const t = token || accessToken;
+      const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${SHEET_RANGE}`;
+      console.log("Loading bids from:", url);
+      const resp = await fetch(url, { headers: { Authorization: `Bearer ${t}` } });
       const data = await resp.json();
+      console.log("Load status:", resp.status, data.error || "OK");
+      if (resp.status === 401) {
+        // Token expired - clear session and ask user to sign in again
+        sessionStorage.removeItem("gtoken");
+        setAccessToken(null);
+        setAuthState("idle");
+        setLoading(false);
+        return;
+      }
       if (data.error) throw new Error(data.error.message);
       const rows = data.values || [];
-      // Skip header row (row 1)
       const loaded = rows.slice(1).map((row, i) => { const b = rowToBid(row); if (b) b._rowIndex = i + 2; return b; }).filter(Boolean).filter(b => b.id);
       setBids(loaded);
     } catch (e) {
@@ -352,6 +366,12 @@ function App() {
       );
       const body = await resp.json();
       console.log("Append status:", resp.status, body);
+      if (resp.status === 401) {
+        sessionStorage.removeItem("gtoken");
+        setAccessToken(null);
+        setAuthState("idle");
+        return;
+      }
       if (!resp.ok) throw new Error(body.error?.message || resp.status);
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus(""), 3000);
@@ -468,10 +488,10 @@ function App() {
           <button onClick={handleRefresh} style={{ background: "#1e2535", color: "#94a3b8", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 12, cursor: "pointer", fontFamily: "'DM Mono',monospace" }}>↻ Refresh</button>
 
           {/* User */}
-          {userInfo && (
+          {accessToken && (
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              {userInfo.picture && <img src={userInfo.picture} style={{ width: 26, height: 26, borderRadius: "50%" }} />}
-              <span style={{ fontSize: 12, color: "#64748b" }}>{userInfo.name}</span>
+              {userInfo && userInfo.picture && <img src={userInfo.picture} style={{ width: 26, height: 26, borderRadius: "50%" }} />}
+              {userInfo && <span style={{ fontSize: 12, color: "#64748b" }}>{userInfo.name}</span>}
               <button onClick={handleSignOut} style={{ background: "transparent", color: "#64748b", border: "1px solid #1e2535", borderRadius: 6, padding: "4px 10px", fontSize: 11, cursor: "pointer", fontFamily: "'DM Mono',monospace" }}>Sign out</button>
             </div>
           )}
