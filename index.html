@@ -7,67 +7,92 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
-<script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="https://apis.google.com/js/api.js"></script>
+<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body, #root { height: 100%; }
-  body { background: #0b0e15; color: #e2e8f0; font-family: 'Syne', sans-serif; }
+  body { background: #0a0d14; color: #f0f2f8; font-family: 'Syne', sans-serif; }
   ::-webkit-scrollbar { width: 6px; }
-  ::-webkit-scrollbar-track { background: #141820; }
-  ::-webkit-scrollbar-thumb { background: #2a3148; border-radius: 3px; }
-  select, input, button { outline: none; }
+  ::-webkit-scrollbar-track { background: #111520; }
+  ::-webkit-scrollbar-thumb { background: #1e2435; border-radius: 3px; }
+  select, input, button { outline: none; font-family: 'Syne', sans-serif; }
   input[type="date"] { color-scheme: dark; cursor: pointer; }
   input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(1); opacity: 0.7; cursor: pointer; }
   input[type="date"]::-webkit-calendar-picker-indicator:hover { opacity: 1; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  .fade-in { animation: fadeIn 0.25s ease forwards; }
 </style>
 </head>
 <body>
 <div id="root"></div>
 
 <script type="text/babel">
-const { useState, useMemo, useEffect, useCallback } = React;
+const { useState, useMemo, useEffect, useRef, useCallback } = React;
 
-// ═══════════════════════════════════════════════
-// ⚙️  CONFIGURATION — REPLACE THESE TWO VALUES
-// ═══════════════════════════════════════════════
-const GOOGLE_CLIENT_ID = "694334131194-ega0ikjnhda4ok5ua42s4h9jpann5u5f.apps.googleusercontent.com";
-const SHEET_ID = "1CbbkP_xZozdlgWBxXM1BMBak3LEuFtKgBvNxrv0okUc";
-const SHEET_RANGE = "BidPortfolio!A:O";
-// ═══════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════
+// ⚙️  CONFIGURATION — FILL IN AFTER AZURE REGISTRATION
+// ═══════════════════════════════════════════════════════
+const MS_CLIENT_ID = "53dc566b-d04e-4dfe-99cd-4713fc786c5a";
+const EXCEL_FILE_NAME = "BidPortfolio.xlsx"; // name of your OneDrive Excel file
+const EXCEL_TABLE = "BidData"; // table name inside the Excel file
+let EXCEL_FILE_ID = null; // resolved automatically on first load
+// ═══════════════════════════════════════════════════════
 
-const SCOPES = "https://www.googleapis.com/auth/spreadsheets";
+// ── MSAL setup ──
+const msalConfig = {
+  auth: {
+    clientId: MS_CLIENT_ID,
+    authority: "https://login.microsoftonline.com/consumers",
+    redirectUri: window.location.origin + window.location.pathname,
+  },
+  cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: false },
+};
 
-// ── Constants ──
-const BLENDED_RATE = 85;
-const HOURS_PER_LEAD_PER_WEEK = 12;
-const LEADS_PER_BID = 10;
-const TOTAL_LEADS = 20;
-const CONCURRENCY_LIMIT = Math.floor(TOTAL_LEADS / LEADS_PER_BID);
-const MOBILISATION_MONTHS = 9;
-const MIN_MARGIN = 8;
-const MIN_WIN_PROB = 20;
-const MAX_BID_COST_PCT = 5;
+const TOKEN_SCOPES = ["User.Read", "Files.ReadWrite"];
 
+// ── Default business logic settings ──
+const DEFAULT_SETTINGS = {
+  blendedRate: 85,
+  hoursPerLeadPerWeek: 12,
+  leadsPerBid: 10,
+  totalLeads: 20,
+  minMargin: 8,
+  minWinProb: 20,
+  maxBidCostPct: 5,
+  mobilisationMonths: 9,
+  concurrencyLimit: 2,
+};
+
+function loadSettings() {
+  try {
+    const saved = localStorage.getItem("bidPortfolioSettings");
+    return saved ? { ...DEFAULT_SETTINGS, ...JSON.parse(saved) } : { ...DEFAULT_SETTINGS };
+  } catch { return { ...DEFAULT_SETTINGS }; }
+}
+
+function saveSettings(s) {
+  localStorage.setItem("bidPortfolioSettings", JSON.stringify(s));
+}
+
+// ── Static options ──
 const STAGES = ["Intake", "Qualified", "Submitted", "Won", "Lost", "No-Go"];
 const REGIONS = ["North West", "Yorkshire", "West Midlands", "South West", "Scotland", "East Midlands", "South East", "North East"];
 const COMPLIANCE_OPTS = ["Pass", "Fail", "TBC"];
-const VIEWS = ["Dashboard", "Portfolio Grid", "Add Bid"];
+const VIEWS = ["Dashboard", "Portfolio Grid", "Add Bid", "Settings"];
 
-const GOColors = { "GO": "#22c55e", "NO-GO": "#ef4444", "REVIEW": "#f59e0b", "WON": "#3b82f6", "LOST": "#6b7280" };
-const StageColors = { Intake: "#a78bfa", Qualified: "#38bdf8", Submitted: "#fb923c", Won: "#22c55e", Lost: "#6b7280", "No-Go": "#ef4444" };
-const CapColor = { OK: "#22c55e", OVER: "#ef4444" };
+const GOColors = { GO: "#4BE8A0", "NO-GO": "#E84B7A", REVIEW: "#E8B84B", WON: "#4B9FE8", LOST: "#6b7280" };
+const StageColors = { Intake: "#A04BE8", Qualified: "#4B9FE8", Submitted: "#E8B84B", Won: "#4BE8A0", Lost: "#6b7280", "No-Go": "#E84B7A" };
+const CapColor = { OK: "#4BE8A0", OVER: "#E84B7A" };
 
 // ── Helpers ──
 function addWeeks(dateStr, weeks) {
-  const d = new Date(dateStr);
-  d.setDate(d.getDate() + weeks * 7);
+  const d = new Date(dateStr); d.setDate(d.getDate() + weeks * 7);
   return d.toISOString().slice(0, 10);
 }
 function addMonths(dateStr, months) {
-  const d = new Date(dateStr);
-  d.setMonth(d.getMonth() + months);
+  const d = new Date(dateStr); d.setMonth(d.getMonth() + months);
   return d.toISOString().slice(0, 10);
 }
 function fmtDate(d) {
@@ -82,10 +107,14 @@ function fmtCurrency(n) {
 function fmtGBP(n) {
   return new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP", maximumFractionDigits: 0 }).format(n);
 }
+function nextId(bids) {
+  const nums = bids.map(b => parseInt(b.id.replace("BID", ""))).filter(n => !isNaN(n));
+  return `BID${String((Math.max(0, ...nums) + 1)).padStart(3, "0")}`;
+}
 
-// ── Sheet row conversion ──
-// Sheet columns: Bid ID | Authority | Name | Region | Stage | Bid Start | Duration Weeks | Contract Value | Win Prob | Target Margin | Strategic Score | Compliance | Decision Owner | Award Date | Notes
-function rowToBid(row) {
+// ── Row conversion ──
+// Columns: Bid ID | Authority | Name | Region | Stage | Bid Start | Duration Weeks | Contract Value | Win Prob | Target Margin | Strategic Score | Compliance | Decision Owner | Award Date | Notes
+function rowToBid(row, idx) {
   if (!row || row.length < 3) return null;
   return {
     id: row[0] || "",
@@ -103,72 +132,70 @@ function rowToBid(row) {
     decisionOwner: row[12] || "",
     awardDate: row[13] || "",
     notes: row[14] || "",
+    _rowIndex: idx, // 0-based index in table rows (not including header)
   };
 }
-
 function bidToRow(bid) {
-  return [
-    bid.id, bid.authority, bid.name, bid.region, bid.stage,
-    bid.bidStart, bid.bidDurationWeeks, bid.contractValue,
-    bid.winProb, bid.targetMargin, bid.strategicScore,
-    bid.compliance, bid.decisionOwner, bid.awardDate || "", bid.notes || ""
-  ];
+  return [bid.id, bid.authority, bid.name, bid.region, bid.stage, bid.bidStart,
+    bid.bidDurationWeeks, bid.contractValue, bid.winProb, bid.targetMargin,
+    bid.strategicScore, bid.compliance, bid.decisionOwner, bid.awardDate || "", bid.notes || ""];
 }
 
 // ── Calculation engine ──
-function calcBid(bid, allBids) {
+function calcBid(bid, allBids, settings) {
+  const S = settings;
   const bidEnd = addWeeks(bid.bidStart, bid.bidDurationWeeks);
-  const totalHours = LEADS_PER_BID * HOURS_PER_LEAD_PER_WEEK * bid.bidDurationWeeks;
-  const bidPursuitCost = totalHours * BLENDED_RATE;
+  const totalHours = S.leadsPerBid * S.hoursPerLeadPerWeek * bid.bidDurationWeeks;
+  const bidPursuitCost = totalHours * S.blendedRate;
   const ev = bid.contractValue * (bid.winProb / 100);
   const bidCostPct = ev > 0 ? (bidPursuitCost / ev) * 100 : 999;
 
   const activeStages = ["Intake", "Qualified"];
   const overlapCount = allBids.filter(b => {
-    if (b.id === bid.id) return false;
-    if (!activeStages.includes(b.stage)) return false;
+    if (b.id === bid.id || !activeStages.includes(b.stage)) return false;
     const bEnd = addWeeks(b.bidStart, b.bidDurationWeeks);
     return b.bidStart <= bidEnd && bEnd >= bid.bidStart;
   }).length;
 
-  const capacityStatus = activeStages.includes(bid.stage) && overlapCount >= CONCURRENCY_LIMIT ? "OVER" : "OK";
+  const capacityStatus = activeStages.includes(bid.stage) && overlapCount >= S.concurrencyLimit ? "OVER" : "OK";
 
   let goNoGo = "GO";
   const flags = [];
   if (bid.compliance === "Fail") { goNoGo = "NO-GO"; flags.push("Compliance fail"); }
   if (capacityStatus === "OVER") { goNoGo = "NO-GO"; flags.push("Capacity OVER"); }
-  if (bid.targetMargin < MIN_MARGIN) { flags.push(`Margin ${bid.targetMargin}% < ${MIN_MARGIN}%`); if (goNoGo === "GO") goNoGo = "REVIEW"; }
-  if (bid.winProb < MIN_WIN_PROB) { flags.push(`Win prob ${bid.winProb}% < ${MIN_WIN_PROB}%`); if (goNoGo === "GO") goNoGo = "REVIEW"; }
-  if (bidCostPct > MAX_BID_COST_PCT) { flags.push(`Bid cost ${bidCostPct.toFixed(1)}% of EV`); if (goNoGo === "GO") goNoGo = "REVIEW"; }
+  if (bid.targetMargin < S.minMargin) { flags.push(`Margin ${bid.targetMargin}% < ${S.minMargin}%`); if (goNoGo === "GO") goNoGo = "REVIEW"; }
+  if (bid.winProb < S.minWinProb) { flags.push(`Win prob ${bid.winProb}% < ${S.minWinProb}%`); if (goNoGo === "GO") goNoGo = "REVIEW"; }
+  if (bidCostPct > S.maxBidCostPct) { flags.push(`Bid cost ${bidCostPct.toFixed(1)}% of EV`); if (goNoGo === "GO") goNoGo = "REVIEW"; }
   if (bid.compliance === "TBC") { flags.push("Compliance TBC"); if (goNoGo === "GO") goNoGo = "REVIEW"; }
   if (bid.stage === "Won") goNoGo = "WON";
   else if (bid.stage === "Lost") goNoGo = "LOST";
   else if (bid.stage === "No-Go") goNoGo = "NO-GO";
 
   const mobilisationStart = bid.stage === "Won" ? (bid.awardDate || bidEnd) : null;
-  const goLiveDate = mobilisationStart ? addMonths(mobilisationStart, MOBILISATION_MONTHS) : null;
+  const goLiveDate = mobilisationStart ? addMonths(mobilisationStart, S.mobilisationMonths) : null;
 
   return { ...bid, bidEnd, totalHours, bidPursuitCost, ev, bidCostPct, overlapCount, capacityStatus, goNoGo, flags, mobilisationStart, goLiveDate };
 }
 
-// ── Shared UI components ──
+// ── Shared components ──
 function Badge({ label, color, small }) {
   return (
     <span style={{
-      background: color + "22", color, border: `1px solid ${color}55`,
+      background: color + "22", color, border: `1px solid ${color}44`,
       borderRadius: 4, padding: small ? "1px 6px" : "2px 8px",
-      fontSize: small ? 10 : 11, fontFamily: "'DM Mono', monospace",
+      fontSize: small ? 10 : 11, fontFamily: "'DM Mono',monospace",
       fontWeight: 500, whiteSpace: "nowrap", display: "inline-block"
     }}>{label}</span>
   );
 }
 
-function KpiCard({ label, value, sub, color }) {
+function KpiCard({ label, value, sub, color, accent }) {
   return (
-    <div style={{ background: "#141820", border: "1px solid #1e2535", borderRadius: 10, padding: "20px 24px", flex: 1, minWidth: 140 }}>
-      <div style={{ fontSize: 11, color: "#64748b", fontFamily: "'DM Mono',monospace", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>{label}</div>
-      <div style={{ fontSize: 26, fontWeight: 800, color: color || "#e2e8f0", lineHeight: 1 }}>{value}</div>
-      {sub && <div style={{ fontSize: 11, color: "#64748b", marginTop: 6 }}>{sub}</div>}
+    <div style={{ background: "#111520", border: `1px solid ${accent || "#1e2435"}`, borderRadius: 10, padding: "20px 24px", flex: 1, minWidth: 140, position: "relative", overflow: "hidden" }}>
+      {accent && <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: accent, borderRadius: "10px 10px 0 0" }} />}
+      <div style={{ fontSize: 10, color: "#9CA3AF", fontFamily: "'DM Mono',monospace", letterSpacing: 1, textTransform: "uppercase", marginBottom: 10 }}>{label}</div>
+      <div style={{ fontSize: 26, fontWeight: 800, color: color || "#f0f2f8", lineHeight: 1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: "#9CA3AF", marginTop: 6 }}>{sub}</div>}
     </div>
   );
 }
@@ -176,39 +203,150 @@ function KpiCard({ label, value, sub, color }) {
 function Spinner({ message }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "60vh", gap: 16 }}>
-      <div style={{ width: 40, height: 40, border: "3px solid #1e2535", borderTop: "3px solid #3b82f6", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-      <div style={{ color: "#64748b", fontSize: 13, fontFamily: "'DM Mono',monospace" }}>{message}</div>
+      <div style={{ width: 36, height: 36, border: "2px solid #1e2435", borderTop: "2px solid #4B9FE8", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+      <div style={{ color: "#9CA3AF", fontSize: 12, fontFamily: "'DM Mono',monospace" }}>{message}</div>
     </div>
   );
 }
 
-// ── Login Screen ──
-function LoginScreen({ onSignIn, error }) {
+function inp(extra) {
+  return {
+    width: "100%", background: "#0d1119", border: "1px solid #1e2435", borderRadius: 7,
+    color: "#f0f2f8", padding: "9px 12px", fontSize: 13, ...extra
+  };
+}
+function lbl() {
+  return { display: "block", fontSize: 10, color: "#9CA3AF", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", letterSpacing: 1, marginBottom: 5 };
+}
+
+// ── Microsoft Login Screen ──
+function LoginScreen({ onSignIn, error, loading }) {
   return (
-    <div style={{ minHeight: "100vh", background: "#0b0e15", display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ background: "#141820", border: "1px solid #1e2535", borderRadius: 16, padding: "48px 56px", textAlign: "center", maxWidth: 420 }}>
-        <div style={{ width: 52, height: 52, background: "linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, margin: "0 auto 20px" }}>🚌</div>
-        <h1 style={{ fontSize: 22, fontWeight: 800, marginBottom: 8 }}>First Bus</h1>
-        <p style={{ color: "#64748b", fontSize: 13, fontFamily: "'DM Mono',monospace", marginBottom: 32 }}>Bid Portfolio 2026–2030</p>
+    <div style={{ minHeight: "100vh", background: "#0a0d14", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div className="fade-in" style={{ background: "#111520", border: "1px solid #1e2435", borderRadius: 16, padding: "48px 56px", textAlign: "center", maxWidth: 420, width: "90%" }}>
+        <div style={{ width: 56, height: 56, background: "linear-gradient(135deg,#4B9FE8,#A04BE8)", borderRadius: 14, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26, margin: "0 auto 20px" }}>🚌</div>
+        <h1 style={{ fontSize: 24, fontWeight: 800, marginBottom: 6 }}>First Bus</h1>
+        <p style={{ color: "#9CA3AF", fontSize: 12, fontFamily: "'DM Mono',monospace", marginBottom: 36, letterSpacing: 0.5 }}>Bid Portfolio Intelligence · 2026–2030</p>
         <button
           onClick={onSignIn}
+          disabled={loading}
           style={{
-            background: "white", color: "#1a1a2e", border: "none", borderRadius: 8,
-            padding: "12px 24px", fontSize: 14, fontWeight: 700, cursor: "pointer",
+            background: loading ? "#1e2435" : "#0078d4", color: "#fff", border: "none", borderRadius: 8,
+            padding: "13px 28px", fontSize: 14, fontWeight: 700, cursor: loading ? "not-allowed" : "pointer",
             display: "flex", alignItems: "center", gap: 10, margin: "0 auto",
-            fontFamily: "'Syne',sans-serif"
+            opacity: loading ? 0.7 : 1, transition: "all 0.2s"
           }}>
-          <svg width="18" height="18" viewBox="0 0 24 24">
-            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
-            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-          </svg>
-          Sign in with Google
+          {loading ? (
+            <div style={{ width: 16, height: 16, border: "2px solid #4B9FE8", borderTop: "2px solid transparent", borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />
+          ) : (
+            <svg width="18" height="18" viewBox="0 0 21 21">
+              <rect x="1" y="1" width="9" height="9" fill="#f25022"/>
+              <rect x="11" y="1" width="9" height="9" fill="#7fba00"/>
+              <rect x="1" y="11" width="9" height="9" fill="#00a4ef"/>
+              <rect x="11" y="11" width="9" height="9" fill="#ffb900"/>
+            </svg>
+          )}
+          {loading ? "Signing in..." : "Sign in with Microsoft"}
         </button>
-        {error && <p style={{ color: "#ef4444", fontSize: 12, marginTop: 16, fontFamily: "'DM Mono',monospace" }}>{error}</p>}
-        <p style={{ color: "#374151", fontSize: 11, marginTop: 24, fontFamily: "'DM Mono',monospace" }}>Access restricted to authorised users only</p>
+        {error && <p style={{ color: "#E84B7A", fontSize: 12, marginTop: 16, fontFamily: "'DM Mono',monospace" }}>{error}</p>}
+        <p style={{ color: "#374151", fontSize: 11, marginTop: 28, fontFamily: "'DM Mono',monospace" }}>Restricted to authorised users only</p>
+      </div>
+    </div>
+  );
+}
+
+// ── Settings Page ──
+function SettingsPage({ settings, onSave }) {
+  const [draft, setDraft] = useState({ ...settings });
+  const [saved, setSaved] = useState(false);
+
+  function handleSave() {
+    onSave(draft);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2500);
+  }
+  function handleReset() {
+    setDraft({ ...DEFAULT_SETTINGS });
+  }
+
+  const fields = [
+    { key: "blendedRate", label: "Blended Team Rate", unit: "£/hr", desc: "Average hourly cost of the bid team" },
+    { key: "hoursPerLeadPerWeek", label: "Hours per Lead per Week", unit: "hrs", desc: "Hours each lead contributes weekly to a bid" },
+    { key: "leadsPerBid", label: "Leads per Bid", unit: "people", desc: "Number of leads assigned to each bid" },
+    { key: "totalLeads", label: "Total Lead Capacity", unit: "people", desc: "Total leads available across the organisation" },
+    { key: "concurrencyLimit", label: "Max Concurrent Bids", unit: "bids", desc: "Maximum number of active bids at one time" },
+    { key: "minMargin", label: "Minimum Target Margin", unit: "%", desc: "Below this margin triggers a REVIEW flag" },
+    { key: "minWinProb", label: "Minimum Win Probability", unit: "%", desc: "Below this probability triggers a REVIEW flag" },
+    { key: "maxBidCostPct", label: "Max Bid Cost (% of EV)", unit: "%", desc: "Pursuit cost above this % of expected value triggers REVIEW" },
+    { key: "mobilisationMonths", label: "Mobilisation Period", unit: "months", desc: "Time from award to go-live" },
+  ];
+
+  return (
+    <div className="fade-in" style={{ maxWidth: 760, margin: "0 auto" }}>
+      <div style={{ marginBottom: 28 }}>
+        <h1 style={{ fontSize: 22, fontWeight: 800, marginBottom: 6 }}>Business Logic Settings</h1>
+        <p style={{ color: "#9CA3AF", fontSize: 13, fontFamily: "'DM Mono',monospace" }}>
+          Configure the assumptions that drive Go/No-Go decisions and viability calculations. Changes apply immediately to all bids.
+        </p>
+      </div>
+
+      <div style={{ background: "#111520", border: "1px solid #1e2435", borderRadius: 12, overflow: "hidden", marginBottom: 20 }}>
+        <div style={{ background: "#0d1119", padding: "14px 24px", borderBottom: "1px solid #1e2435" }}>
+          <div style={{ fontSize: 10, color: "#9CA3AF", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", letterSpacing: 1 }}>Calculation Parameters</div>
+        </div>
+        <div style={{ padding: 24, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+          {fields.map(({ key, label, unit, desc }) => (
+            <div key={key}>
+              <label style={lbl()}>{label}</label>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="number"
+                  value={draft[key]}
+                  onChange={e => setDraft(p => ({ ...p, [key]: Number(e.target.value) }))}
+                  style={{ ...inp(), flex: 1 }}
+                />
+                <span style={{ fontSize: 12, color: "#9CA3AF", fontFamily: "'DM Mono',monospace", whiteSpace: "nowrap" }}>{unit}</span>
+              </div>
+              <div style={{ fontSize: 11, color: "#4B5563", marginTop: 4 }}>{desc}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Go/No-Go rule summary */}
+      <div style={{ background: "#111520", border: "1px solid #1e2435", borderRadius: 12, overflow: "hidden", marginBottom: 24 }}>
+        <div style={{ background: "#0d1119", padding: "14px 24px", borderBottom: "1px solid #1e2435" }}>
+          <div style={{ fontSize: 10, color: "#9CA3AF", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", letterSpacing: 1 }}>Current Decision Rules (live preview)</div>
+        </div>
+        <div style={{ padding: "18px 24px", display: "flex", flexDirection: "column", gap: 10 }}>
+          {[
+            { label: "NO-GO if compliance = Fail", color: "#E84B7A" },
+            { label: `NO-GO if active bids exceed ${draft.concurrencyLimit}`, color: "#E84B7A" },
+            { label: `REVIEW if margin < ${draft.minMargin}%`, color: "#E8B84B" },
+            { label: `REVIEW if win probability < ${draft.minWinProb}%`, color: "#E8B84B" },
+            { label: `REVIEW if bid cost > ${draft.maxBidCostPct}% of EV`, color: "#E8B84B" },
+            { label: `Bid pursuit cost = ${draft.leadsPerBid} leads × ${draft.hoursPerLeadPerWeek} hrs/wk × £${draft.blendedRate}/hr × duration`, color: "#4B9FE8" },
+            { label: `Mobilisation period = ${draft.mobilisationMonths} months from award date`, color: "#4BE8A0" },
+          ].map(({ label, color }) => (
+            <div key={label} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ width: 6, height: 6, borderRadius: "50%", background: color, flexShrink: 0 }} />
+              <span style={{ fontSize: 12, color: "#9CA3AF", fontFamily: "'DM Mono',monospace" }}>{label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 12 }}>
+        <button
+          onClick={handleSave}
+          style={{ background: "#4B9FE8", color: "#fff", border: "none", borderRadius: 8, padding: "11px 28px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+          {saved ? "✓ Saved" : "Save Settings"}
+        </button>
+        <button
+          onClick={handleReset}
+          style={{ background: "transparent", color: "#9CA3AF", border: "1px solid #1e2435", borderRadius: 8, padding: "11px 20px", fontSize: 13, cursor: "pointer" }}>
+          Reset to Defaults
+        </button>
       </div>
     </div>
   );
@@ -216,18 +354,19 @@ function LoginScreen({ onSignIn, error }) {
 
 // ── Main App ──
 function App() {
+  const msalRef = useRef(null);
   const [authState, setAuthState] = useState("idle");
   const [authError, setAuthError] = useState("");
   const [accessToken, setAccessToken] = useState(null);
   const [userInfo, setUserInfo] = useState(null);
   const [bids, setBids] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [syncStatus, setSyncStatus] = useState(""); // "", "saved", "error"
+  const [syncStatus, setSyncStatus] = useState("");
   const [view, setView] = useState("Dashboard");
   const [selectedBid, setSelectedBid] = useState(null);
   const [filterStage, setFilterStage] = useState("All");
   const [filterGNG, setFilterGNG] = useState("All");
+  const [settings, setSettings] = useState(loadSettings);
   const [newBid, setNewBid] = useState({
     authority: "", name: "", region: REGIONS[0], stage: "Intake",
     bidStart: new Date().toISOString().slice(0, 10), bidDurationWeeks: 20,
@@ -235,168 +374,181 @@ function App() {
     compliance: "Pass", decisionOwner: "", notes: ""
   });
 
-  // ── Google Auth ──
-  const tokenClient = React.useRef(null);
-
+  // Init MSAL
   useEffect(() => {
-    // Load gapi then restore session if token exists
-    const initGapi = () => {
-      window.gapi.load("client", async () => {
-        await window.gapi.client.init({});
-        await window.gapi.client.load("https://sheets.googleapis.com/$discovery/rest?version=v4");
-        const saved = sessionStorage.getItem("gtoken");
-        if (saved) {
-          window.gapi.client.setToken({ access_token: saved });
-          setAccessToken(saved);
-          setAuthState("authenticated");
-          // Re-fetch userInfo to restore name/picture
-          fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-            headers: { Authorization: `Bearer ${saved}` }
-          }).then(r => r.json()).then(info => {
-            if (info.name) setUserInfo(info);
-          }).catch(() => {});
-          loadBids(saved);
-        }
+    // client ID is set
+    try {
+      msalRef.current = new msal.PublicClientApplication(msalConfig);
+      msalRef.current.initialize().then(() => {
+        // Handle redirect response
+        msalRef.current.handleRedirectPromise().then(resp => {
+          if (resp) finishLogin(resp);
+          else {
+            // Check for existing session
+            const accounts = msalRef.current.getAllAccounts();
+            if (accounts.length > 0) silentLogin(accounts[0]);
+          }
+        });
       });
-    };
-    // Wait for gapi script to be ready
-    if (window.gapi) {
-      initGapi();
-    } else {
-      const interval = setInterval(() => {
-        if (window.gapi) {
-          clearInterval(interval);
-          initGapi();
-        }
-      }, 100);
-    }
+    } catch (e) { console.error("MSAL init error:", e); }
   }, []);
 
-  function handleSignIn() {
+  async function silentLogin(account) {
+    try {
+      const resp = await msalRef.current.acquireTokenSilent({ scopes: TOKEN_SCOPES, account });
+      finishLogin(resp);
+    } catch (e) {
+      console.log("Silent login failed, user must sign in again");
+    }
+  }
+
+  async function finishLogin(resp) {
+    const token = resp.accessToken;
+    setAccessToken(token);
+    setAuthState("authenticated");
+    // Get user profile
+    try {
+      const me = await fetch("https://graph.microsoft.com/v1.0/me", {
+        headers: { Authorization: `Bearer ${token}` }
+      }).then(r => r.json());
+      setUserInfo({ name: me.displayName, email: me.mail || me.userPrincipalName });
+    } catch (e) { console.log("Profile fetch failed", e); }
+    loadBids(token);
+  }
+
+  async function handleSignIn() {
+    if (!msalRef.current) {
+      setAuthError("App not configured yet — please add your Azure Client ID.");
+      return;
+    }
     setAuthState("signing-in");
     setAuthError("");
-
-    if (!tokenClient.current) {
-      tokenClient.current = window.google.accounts.oauth2.initTokenClient({
-        client_id: GOOGLE_CLIENT_ID,
-        scope: SCOPES,
-        callback: async (response) => {
-          if (response.error) {
-            setAuthState("error");
-            setAuthError("Sign in failed. Please try again.");
-            return;
-          }
-          setAccessToken(response.access_token);
-          sessionStorage.setItem("gtoken", response.access_token);
-          window.gapi.client.setToken({ access_token: response.access_token });
-
-          // Get user info
-          try {
-            const userResp = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-              headers: { Authorization: `Bearer ${response.access_token}` }
-            });
-            const user = await userResp.json();
-            setUserInfo(user);
-          } catch(e) {}
-
-          setAuthState("authenticated");
-          loadBids(response.access_token);
-        }
+    try {
+      const resp = await msalRef.current.loginPopup({ scopes: TOKEN_SCOPES });
+      // After login, acquire token
+      const tokenResp = await msalRef.current.acquireTokenSilent({
+        scopes: TOKEN_SCOPES,
+        account: resp.account
       });
+      finishLogin(tokenResp);
+    } catch (e) {
+      setAuthState("idle");
+      setAuthError("Sign in failed. Please try again.");
+      console.error("Login error:", e);
     }
-    tokenClient.current.requestAccessToken({ prompt: "consent" });
+  }
+
+  async function getToken() {
+    if (!msalRef.current) return null;
+    const accounts = msalRef.current.getAllAccounts();
+    if (!accounts.length) return null;
+    try {
+      const resp = await msalRef.current.acquireTokenSilent({ scopes: TOKEN_SCOPES, account: accounts[0] });
+      setAccessToken(resp.accessToken);
+      return resp.accessToken;
+    } catch (e) {
+      // Silent failed — need interactive
+      try {
+        const resp = await msalRef.current.acquireTokenPopup({ scopes: TOKEN_SCOPES });
+        setAccessToken(resp.accessToken);
+        return resp.accessToken;
+      } catch (e2) {
+        setAuthState("idle");
+        return null;
+      }
+    }
   }
 
   function handleSignOut() {
-    if (accessToken) {
-      window.google.accounts.oauth2.revoke(accessToken);
+    if (msalRef.current) {
+      const accounts = msalRef.current.getAllAccounts();
+      if (accounts.length) msalRef.current.logoutPopup({ account: accounts[0] });
     }
     setAccessToken(null);
-    sessionStorage.removeItem("gtoken");
     setUserInfo(null);
     setBids([]);
     setAuthState("idle");
   }
 
-  // ── Load bids from Sheet ──
+  // ── Excel API calls ──
+  async function resolveFileId(t) {
+    if (EXCEL_FILE_ID) return EXCEL_FILE_ID;
+    const resp = await fetch(
+      `https://graph.microsoft.com/v1.0/me/drive/root/search(q='${EXCEL_FILE_NAME}')`,
+      { headers: { Authorization: `Bearer ${t}` } }
+    );
+    const data = await resp.json();
+    console.log("File search:", data);
+    const file = (data.value || []).find(f => f.name === EXCEL_FILE_NAME);
+    if (!file) throw new Error(`File "${EXCEL_FILE_NAME}" not found in OneDrive`);
+    EXCEL_FILE_ID = file.id;
+    console.log("Resolved file ID:", EXCEL_FILE_ID);
+    return EXCEL_FILE_ID;
+  }
+
   async function loadBids(token) {
     setLoading(true);
     try {
-      const t = token || accessToken;
-      const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${SHEET_RANGE}`;
-      console.log("Loading bids from:", url);
+      const t = token || await getToken();
+      if (!t) return;
+      const fileId = await resolveFileId(t);
+      const url = `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/workbook/tables/${EXCEL_TABLE}/rows`;
+      console.log("Loading bids from Excel:", url);
       const resp = await fetch(url, { headers: { Authorization: `Bearer ${t}` } });
       const data = await resp.json();
       console.log("Load status:", resp.status, data.error || "OK");
-      if (resp.status === 401) {
-        // Token expired - clear session and ask user to sign in again
-        sessionStorage.removeItem("gtoken");
-        setAccessToken(null);
-        setAuthState("idle");
-        setLoading(false);
-        return;
-      }
-      if (data.error) throw new Error(data.error.message);
-      const rows = data.values || [];
-      const loaded = rows.slice(1).map((row, i) => { const b = rowToBid(row); if (b) b._rowIndex = i + 2; return b; }).filter(Boolean).filter(b => b.id);
+      if (!resp.ok) throw new Error(data.error?.message || resp.status);
+      const loaded = (data.value || [])
+        .map((row, i) => rowToBid(row.values[0], i))
+        .filter(Boolean).filter(b => b.id);
       setBids(loaded);
     } catch (e) {
       console.error("Load error:", e);
       setSyncStatus("error");
-    } finally {
-      setLoading(false);
-    }
+    } finally { setLoading(false); }
   }
 
-  // ── Save new bid to Sheet ──
   async function appendBid(bid) {
-    setSaving(true);
     setSyncStatus("");
     try {
-      const row = bidToRow(bid);
-      const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${SHEET_RANGE}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`;
+      const t = await getToken();
+      if (!t) return;
+      const fileId = await resolveFileId(t);
+      const url = `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/workbook/tables/${EXCEL_TABLE}/rows/add`;
       const resp = await fetch(url, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({ values: [row] })
-        }
-      );
+        method: "POST",
+        headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ values: [bidToRow(bid)] })
+      });
       const body = await resp.json();
       console.log("Append status:", resp.status, body);
-      if (resp.status === 401) {
-        sessionStorage.removeItem("gtoken");
-        setAccessToken(null);
-        setAuthState("idle");
-        return;
-      }
       if (!resp.ok) throw new Error(body.error?.message || resp.status);
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus(""), 3000);
     } catch (e) {
       console.error("Save error:", e);
       setSyncStatus("error");
-    } finally {
-      setSaving(false);
     }
   }
 
-  // ── Update existing bid in Sheet ──
-  async function updateBidInSheet(bid) {
-    if (!bid._rowIndex) return;
+  async function updateBidInExcel(bid) {
+    if (bid._rowIndex === undefined) return;
     setSyncStatus("");
     try {
-      const row = bidToRow(bid);
-      await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/BidPortfolio!A${bid._rowIndex}:O${bid._rowIndex}?valueInputOption=RAW`,
-        {
-          method: "PUT",
-          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ values: [row] })
-        }
-      );
+      const t = await getToken();
+      if (!t) return;
+      const fileId = await resolveFileId(t);
+      const url = `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/workbook/tables/${EXCEL_TABLE}/rows/$/itemAt(index=${bid._rowIndex})`;
+      const resp = await fetch(url, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ values: [bidToRow(bid)] })
+      });
+      console.log("Update status:", resp.status);
+      if (!resp.ok) {
+        const body = await resp.json();
+        throw new Error(body.error?.message || resp.status);
+      }
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus(""), 3000);
     } catch (e) {
@@ -405,227 +557,205 @@ function App() {
     }
   }
 
-
-  // ── Refresh from sheet ──
-  async function handleRefresh() {
-    await loadBids();
-    setSyncStatus("saved");
-    setTimeout(() => setSyncStatus(""), 2000);
+  function handleSaveSettings(s) {
+    setSettings(s);
+    saveSettings(s);
   }
 
-  const computed = useMemo(() => bids.map(b => calcBid(b, bids)), [bids]);
-  const active = computed.filter(b => ["Intake", "Qualified"].includes(b.stage));
-  const totalPursuitCost = computed.filter(b => !["Won","Lost","No-Go"].includes(b.stage)).reduce((s, b) => s + b.bidPursuitCost, 0);
-  const totalEV = computed.reduce((s, b) => s + b.ev, 0);
-  const overCapacity = computed.filter(b => b.capacityStatus === "OVER");
-  const needsDecision = computed.filter(b => b.goNoGo === "REVIEW");
+  // Computed bids with all calculations
+  const computed = useMemo(() => bids.map(b => calcBid(b, bids, settings)), [bids, settings]);
+  const filtered = useMemo(() => computed.filter(b =>
+    (filterStage === "All" || b.stage === filterStage) &&
+    (filterGNG === "All" || b.goNoGo === filterGNG)
+  ), [computed, filterStage, filterGNG]);
 
-  const filtered = computed.filter(b => {
-    if (filterStage !== "All" && b.stage !== filterStage) return false;
-    if (filterGNG !== "All" && b.goNoGo !== filterGNG) return false;
-    return true;
-  });
-
-  async function handleAddBid() {
-    const id = `BID-${String(bids.length + 1).padStart(3, "0")}`;
-    const fullBid = {
-      ...newBid, id,
+  async function handleAddBid(e) {
+    e.preventDefault();
+    const bid = {
+      ...newBid,
+      id: nextId(bids),
       contractValue: Number(newBid.contractValue),
       winProb: Number(newBid.winProb),
       targetMargin: Number(newBid.targetMargin),
-      bidDurationWeeks: Number(newBid.bidDurationWeeks)
+      bidDurationWeeks: Number(newBid.bidDurationWeeks),
+      awardDate: "",
     };
-    setBids(prev => [...prev, fullBid]);
-    await appendBid(fullBid);
-    setNewBid({ authority: "", name: "", region: REGIONS[0], stage: "Intake", bidStart: new Date().toISOString().slice(0, 10), bidDurationWeeks: 20, contractValue: "", winProb: "", targetMargin: "", strategicScore: 3, compliance: "Pass", decisionOwner: "", notes: "" });
+    setBids(prev => [...prev, { ...bid, _rowIndex: prev.length }]);
+    await appendBid(bid);
+    await loadBids();
+    setNewBid({
+      authority: "", name: "", region: REGIONS[0], stage: "Intake",
+      bidStart: new Date().toISOString().slice(0, 10), bidDurationWeeks: 20,
+      contractValue: "", winProb: "", targetMargin: "", strategicScore: 3,
+      compliance: "Pass", decisionOwner: "", notes: ""
+    });
     setView("Portfolio Grid");
   }
 
-  const inp = (extra = {}) => ({
-    background: "#0b0e15", border: "1px solid #1e2535", color: "#e2e8f0",
-    borderRadius: 6, padding: "8px 12px", fontSize: 13,
-    fontFamily: "'Syne',sans-serif", width: "100%", ...extra
-  });
-  const lbl = { fontSize: 11, color: "#64748b", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", letterSpacing: 1, marginBottom: 4, display: "block" };
-
-  // ── Auth screens ──
-  if (authState === "idle" || authState === "signing-in" || authState === "error") {
-    return <LoginScreen onSignIn={handleSignIn} error={authError} />;
+  // ── Auth gate ──
+  if (authState !== "authenticated") {
+    return <LoginScreen onSignIn={handleSignIn} error={authError} loading={authState === "signing-in"} />;
   }
+  if (loading) return <Spinner message="Loading bids from OneDrive…" />;
 
-  if (loading) return <Spinner message="Loading bids from Google Sheets..." />;
+  // ── Header ──
+  const syncColor = syncStatus === "saved" ? "#4BE8A0" : syncStatus === "error" ? "#E84B7A" : "#9CA3AF";
+  const syncLabel = syncStatus === "saved" ? "✓ Synced" : syncStatus === "error" ? "✕ Sync error" : "";
 
   return (
-    <div style={{ minHeight: "100vh", background: "#0b0e15", color: "#e2e8f0" }}>
+    <div style={{ minHeight: "100vh", background: "#0a0d14", color: "#f0f2f8" }}>
 
       {/* Header */}
-      <div style={{ background: "#0f1420", borderBottom: "1px solid #1e2535", padding: "0 32px", display: "flex", alignItems: "center", justifyContent: "space-between", height: 56, position: "sticky", top: 0, zIndex: 100 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ width: 30, height: 30, background: "linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15 }}>🚌</div>
-          <span style={{ fontWeight: 800, fontSize: 15 }}>First Bus</span>
-          <span style={{ color: "#2a3148", fontSize: 18 }}>|</span>
-          <span style={{ color: "#64748b", fontSize: 13 }}>Bid Portfolio 2026–2030</span>
+      <div style={{ background: "#111520", borderBottom: "1px solid #1e2435", padding: "0 28px", display: "flex", alignItems: "center", justifyContent: "space-between", height: 54, position: "sticky", top: 0, zIndex: 100 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{ width: 30, height: 30, background: "linear-gradient(135deg,#4B9FE8,#A04BE8)", borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15 }}>🚌</div>
+          <span style={{ fontWeight: 800, fontSize: 14 }}>First Bus</span>
+          <span style={{ color: "#1e2435", fontSize: 18 }}>|</span>
+          <nav style={{ display: "flex", gap: 4 }}>
+            {VIEWS.map(v => (
+              <button key={v} onClick={() => setView(v)} style={{
+                background: view === v ? "#1e2435" : "transparent",
+                color: view === v ? "#f0f2f8" : "#9CA3AF",
+                border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 12,
+                cursor: "pointer", fontWeight: view === v ? 700 : 400, fontFamily: "'Syne',sans-serif",
+                transition: "all 0.15s"
+              }}>{v}</button>
+            ))}
+          </nav>
         </div>
-
-        <div style={{ display: "flex", gap: 4 }}>
-          {VIEWS.map(v => (
-            <button key={v} onClick={() => setView(v)} style={{
-              background: view === v ? "#1e2535" : "transparent",
-              color: view === v ? "#e2e8f0" : "#64748b",
-              border: "none", borderRadius: 6, padding: "6px 16px",
-              fontSize: 13, cursor: "pointer", fontFamily: "'Syne',sans-serif", fontWeight: 600
-            }}>{v}</button>
-          ))}
-        </div>
-
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          {/* Sync status */}
-          {saving && <span style={{ fontSize: 11, color: "#f59e0b", fontFamily: "'DM Mono',monospace" }}>⏳ Saving...</span>}
-          {syncStatus === "saved" && <span style={{ fontSize: 11, color: "#22c55e", fontFamily: "'DM Mono',monospace" }}>✓ Synced</span>}
-          {syncStatus === "error" && <span style={{ fontSize: 11, color: "#ef4444", fontFamily: "'DM Mono',monospace" }}>⚠ Sync error</span>}
-
-          {/* Refresh */}
-          <button onClick={handleRefresh} style={{ background: "#1e2535", color: "#94a3b8", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 12, cursor: "pointer", fontFamily: "'DM Mono',monospace" }}>↻ Refresh</button>
-
-          {/* User */}
+          {syncLabel && <span style={{ fontSize: 11, color: syncColor, fontFamily: "'DM Mono',monospace" }}>{syncLabel}</span>}
           {accessToken && (
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              {userInfo && userInfo.picture && <img src={userInfo.picture} style={{ width: 26, height: 26, borderRadius: "50%" }} />}
-              {userInfo && <span style={{ fontSize: 12, color: "#64748b" }}>{userInfo.name}</span>}
-              <button onClick={handleSignOut} style={{ background: "transparent", color: "#64748b", border: "1px solid #1e2535", borderRadius: 6, padding: "4px 10px", fontSize: 11, cursor: "pointer", fontFamily: "'DM Mono',monospace" }}>Sign out</button>
+              {userInfo && <span style={{ fontSize: 12, color: "#9CA3AF" }}>{userInfo.name}</span>}
+              <button onClick={handleSignOut} style={{ background: "transparent", color: "#9CA3AF", border: "1px solid #1e2435", borderRadius: 6, padding: "4px 10px", fontSize: 11, cursor: "pointer", fontFamily: "'DM Mono',monospace" }}>Sign out</button>
             </div>
           )}
         </div>
       </div>
 
-      <div style={{ padding: "28px 32px", maxWidth: 1400, margin: "0 auto" }}>
+      <div style={{ padding: "28px 28px" }}>
+
+        {/* ═══ SETTINGS ═══ */}
+        {view === "Settings" && (
+          <SettingsPage settings={settings} onSave={handleSaveSettings} />
+        )}
 
         {/* ═══ DASHBOARD ═══ */}
         {view === "Dashboard" && (
-          <div>
+          <div className="fade-in">
             <div style={{ marginBottom: 24 }}>
-              <h1 style={{ fontSize: 26, fontWeight: 800, marginBottom: 4 }}>Portfolio Overview</h1>
-              <p style={{ color: "#64748b", fontSize: 13, fontFamily: "'DM Mono',monospace" }}>
-                As at {new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })} · {bids.length} bids · Live from Google Sheets
+              <h1 style={{ fontSize: 22, fontWeight: 800, marginBottom: 4 }}>Portfolio Dashboard</h1>
+              <p style={{ color: "#9CA3AF", fontSize: 12, fontFamily: "'DM Mono',monospace" }}>
+                Franchise cycle 2026–2030 · {computed.length} bids tracked
               </p>
             </div>
 
-            {bids.length === 0 && (
-              <div style={{ background: "#141820", border: "1px dashed #1e2535", borderRadius: 10, padding: "40px", textAlign: "center", marginBottom: 24 }}>
-                <div style={{ fontSize: 32, marginBottom: 12 }}>📋</div>
-                <div style={{ fontWeight: 700, marginBottom: 8 }}>No bids yet</div>
-                <div style={{ color: "#64748b", fontSize: 13 }}>Go to Add Bid to enter your first bid, or check your Google Sheet has data.</div>
-              </div>
-            )}
-
-            <div style={{ display: "flex", gap: 14, marginBottom: 22, flexWrap: "wrap" }}>
-              <KpiCard label="Total Bids" value={bids.length} sub={`${active.length} active pursuits`} />
-              <KpiCard label="Pursuit Cost Exposure" value={fmtCurrency(totalPursuitCost)} sub="Active + qualified" color="#f59e0b" />
-              <KpiCard label="Total Expected Value" value={fmtCurrency(totalEV)} sub="Across all bids" color="#22c55e" />
-              <KpiCard label="Capacity Conflicts" value={overCapacity.length} sub={overCapacity.length ? overCapacity.map(b => b.id).join(", ") : "None"} color={overCapacity.length ? "#ef4444" : "#22c55e"} />
-              <KpiCard label="Decisions Needed" value={needsDecision.length} sub="REVIEW status" color={needsDecision.length ? "#f59e0b" : "#22c55e"} />
+            {/* KPI row */}
+            <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 24 }}>
+              <KpiCard label="Active Bids" value={computed.filter(b => ["Intake","Qualified","Submitted"].includes(b.stage)).length} accent="#4B9FE8" />
+              <KpiCard label="Pipeline EV" value={fmtCurrency(computed.reduce((s, b) => s + b.ev, 0))} accent="#4BE8A0" color="#4BE8A0" />
+              <KpiCard label="GO" value={computed.filter(b => b.goNoGo === "GO").length} accent="#4BE8A0" color="#4BE8A0" />
+              <KpiCard label="REVIEW" value={computed.filter(b => b.goNoGo === "REVIEW").length} accent="#E8B84B" color="#E8B84B" />
+              <KpiCard label="NO-GO" value={computed.filter(b => b.goNoGo === "NO-GO").length} accent="#E84B7A" color="#E84B7A" />
+              <KpiCard label="Won" value={computed.filter(b => b.stage === "Won").length} accent="#A04BE8" color="#A04BE8" />
             </div>
 
-            <div style={{ display: "flex", gap: 14, marginBottom: 22, flexWrap: "wrap" }}>
-              {["GO","REVIEW","NO-GO","WON","LOST"].map(g => {
-                const count = computed.filter(b => b.goNoGo === g).length;
-                return (
-                  <div key={g} style={{ background: "#141820", border: `1px solid ${GOColors[g]}44`, borderRadius: 10, padding: "18px 20px", flex: 1, minWidth: 100, textAlign: "center" }}>
-                    <div style={{ fontSize: 34, fontWeight: 800, color: GOColors[g] }}>{count}</div>
-                    <div style={{ fontSize: 11, color: "#64748b", fontFamily: "'DM Mono',monospace", marginTop: 5 }}>{g}</div>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Active Pursuits */}
-            <div style={{ background: "#141820", border: "1px solid #1e2535", borderRadius: 10, overflow: "hidden", marginBottom: 20 }}>
-              <div style={{ padding: "14px 20px", borderBottom: "1px solid #1e2535", display: "flex", justifyContent: "space-between" }}>
-                <span style={{ fontWeight: 700, fontSize: 14 }}>Active Pursuits</span>
-                <span style={{ fontSize: 11, color: "#64748b", fontFamily: "'DM Mono',monospace" }}>Intake &amp; Qualified</span>
+            {/* Stage breakdown */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 24 }}>
+              <div style={{ background: "#111520", border: "1px solid #1e2435", borderRadius: 10, padding: "20px 24px" }}>
+                <div style={{ fontSize: 10, color: "#9CA3AF", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", letterSpacing: 1, marginBottom: 14 }}>Stage Breakdown</div>
+                {STAGES.map(s => {
+                  const count = computed.filter(b => b.stage === s).length;
+                  const pct = computed.length ? (count / computed.length) * 100 : 0;
+                  return (
+                    <div key={s} style={{ marginBottom: 10 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                        <span style={{ fontSize: 12, color: "#9CA3AF" }}>{s}</span>
+                        <span style={{ fontSize: 12, fontFamily: "'DM Mono',monospace", color: StageColors[s] }}>{count}</span>
+                      </div>
+                      <div style={{ background: "#0d1119", borderRadius: 2, height: 3 }}>
+                        <div style={{ width: `${pct}%`, background: StageColors[s], height: 3, borderRadius: 2, transition: "width 0.5s ease" }} />
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, minWidth: 700 }}>
-                  <thead>
-                    <tr style={{ borderBottom: "1px solid #1e2535" }}>
-                      {["Bid","Opportunity","Region","Due Date","Contract Value","Win Prob","EV","Go/No-Go","Capacity"].map(h => (
-                        <th key={h} style={{ padding: "10px 16px", textAlign: "left", color: "#64748b", fontFamily: "'DM Mono',monospace", fontSize: 10, fontWeight: 500, textTransform: "uppercase", letterSpacing: 1, whiteSpace: "nowrap" }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {computed.filter(b => ["Intake","Qualified"].includes(b.stage)).map(b => (
-                      <tr key={b.id}
-                        onClick={() => { setSelectedBid(b); setView("Portfolio Grid"); }}
-                        style={{ borderBottom: "1px solid #1a2030", cursor: "pointer" }}
-                        onMouseEnter={e => e.currentTarget.style.background = "#1a2030"}
-                        onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
-                        <td style={{ padding: "11px 16px", fontFamily: "'DM Mono',monospace", color: "#64748b", fontSize: 11 }}>{b.id}</td>
-                        <td style={{ padding: "11px 16px", fontWeight: 600 }}>{b.name}</td>
-                        <td style={{ padding: "11px 16px", color: "#94a3b8" }}>{b.region}</td>
-                        <td style={{ padding: "11px 16px", fontFamily: "'DM Mono',monospace", fontSize: 12 }}>{fmtDate(b.bidEnd)}</td>
-                        <td style={{ padding: "11px 16px" }}>{fmtCurrency(b.contractValue)}</td>
-                        <td style={{ padding: "11px 16px" }}>{b.winProb}%</td>
-                        <td style={{ padding: "11px 16px", color: "#22c55e" }}>{fmtCurrency(b.ev)}</td>
-                        <td style={{ padding: "11px 16px" }}><Badge label={b.goNoGo} color={GOColors[b.goNoGo] || "#64748b"} /></td>
-                        <td style={{ padding: "11px 16px" }}><Badge label={b.capacityStatus} color={CapColor[b.capacityStatus]} small /></td>
-                      </tr>
-                    ))}
-                    {computed.filter(b => ["Intake","Qualified"].includes(b.stage)).length === 0 && (
-                      <tr><td colSpan={9} style={{ padding: "20px 16px", color: "#64748b", fontSize: 13 }}>No active pursuits.</td></tr>
-                    )}
-                  </tbody>
-                </table>
+              <div style={{ background: "#111520", border: "1px solid #1e2435", borderRadius: 10, padding: "20px 24px" }}>
+                <div style={{ fontSize: 10, color: "#9CA3AF", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", letterSpacing: 1, marginBottom: 14 }}>Capacity Monitor</div>
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 12, color: "#9CA3AF", marginBottom: 6 }}>Active lead utilisation</div>
+                  {(() => {
+                    const active = computed.filter(b => ["Intake","Qualified"].includes(b.stage)).length;
+                    const max = settings.concurrencyLimit;
+                    const pct = Math.min((active / max) * 100, 100);
+                    const over = active > max;
+                    return (
+                      <>
+                        <div style={{ background: "#0d1119", borderRadius: 4, height: 8, marginBottom: 6 }}>
+                          <div style={{ width: `${pct}%`, background: over ? "#E84B7A" : "#4BE8A0", height: 8, borderRadius: 4, transition: "width 0.5s" }} />
+                        </div>
+                        <div style={{ fontSize: 11, fontFamily: "'DM Mono',monospace", color: over ? "#E84B7A" : "#4BE8A0" }}>
+                          {active} / {max} concurrent bids {over ? "⚠ OVER CAPACITY" : ""}
+                        </div>
+                      </>
+                    );
+                  })()}
+                </div>
+                <div style={{ fontSize: 10, color: "#9CA3AF", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", letterSpacing: 1, marginBottom: 10 }}>Won — Mobilisation</div>
+                {computed.filter(b => b.stage === "Won").length === 0
+                  ? <div style={{ fontSize: 12, color: "#4B5563" }}>No won bids yet</div>
+                  : computed.filter(b => b.stage === "Won").map(b => (
+                    <div key={b.id} style={{ marginBottom: 8, padding: "8px 10px", background: "#0d1119", borderRadius: 6 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 2 }}>{b.name}</div>
+                      <span style={{ fontSize: 11, color: "#9CA3AF", fontFamily: "'DM Mono',monospace" }}>Go-Live: {fmtDate(b.goLiveDate)}</span>
+                    </div>
+                  ))
+                }
               </div>
             </div>
 
-            {/* Won bids */}
-            <div style={{ background: "#141820", border: "1px solid #1e2535", borderRadius: 10, overflow: "hidden" }}>
-              <div style={{ padding: "14px 20px", borderBottom: "1px solid #1e2535" }}>
-                <span style={{ fontWeight: 700, fontSize: 14 }}>Won Bids — Mobilisation Pipeline</span>
+            {/* Pursuit cost summary */}
+            <div style={{ background: "#111520", border: "1px solid #1e2435", borderRadius: 10, padding: "18px 24px" }}>
+              <div style={{ fontSize: 10, color: "#9CA3AF", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", letterSpacing: 1, marginBottom: 12 }}>Pursuit Cost Summary</div>
+              <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
+                <div><div style={{ fontSize: 11, color: "#9CA3AF", marginBottom: 4 }}>Total pursuit cost</div><div style={{ fontSize: 20, fontWeight: 800, color: "#E8B84B" }}>{fmtGBP(computed.reduce((s, b) => s + b.bidPursuitCost, 0))}</div></div>
+                <div><div style={{ fontSize: 11, color: "#9CA3AF", marginBottom: 4 }}>Blended rate</div><div style={{ fontSize: 20, fontWeight: 800 }}>£{settings.blendedRate}/hr</div></div>
+                <div><div style={{ fontSize: 11, color: "#9CA3AF", marginBottom: 4 }}>Total bid hours</div><div style={{ fontSize: 20, fontWeight: 800 }}>{computed.reduce((s, b) => s + b.totalHours, 0).toLocaleString()} hrs</div></div>
+                <div><div style={{ fontSize: 11, color: "#9CA3AF", marginBottom: 4 }}>Win rate</div><div style={{ fontSize: 20, fontWeight: 800, color: "#4BE8A0" }}>{computed.length ? `${Math.round(computed.filter(b=>b.stage==="Won").length/computed.length*100)}%` : "—"}</div></div>
               </div>
-              {computed.filter(b => b.stage === "Won").length === 0
-                ? <div style={{ padding: "18px 20px", color: "#64748b", fontSize: 13 }}>No won bids yet.</div>
-                : computed.filter(b => b.stage === "Won").map(b => (
-                  <div key={b.id} style={{ padding: "14px 20px", borderBottom: "1px solid #1a2030", display: "flex", gap: 20, alignItems: "center", flexWrap: "wrap" }}>
-                    <Badge label="WON" color={GOColors.WON} />
-                    <span style={{ fontWeight: 600, flex: 1 }}>{b.name}</span>
-                    <span style={{ color: "#64748b", fontSize: 12, fontFamily: "'DM Mono',monospace" }}>Mob Start: {fmtDate(b.mobilisationStart)}</span>
-                    <span style={{ color: "#22c55e", fontSize: 12, fontFamily: "'DM Mono',monospace" }}>Go-Live: {fmtDate(b.goLiveDate)}</span>
-                    <span style={{ fontWeight: 700 }}>{fmtCurrency(b.contractValue)}</span>
-                  </div>
-                ))}
             </div>
           </div>
         )}
 
         {/* ═══ PORTFOLIO GRID ═══ */}
         {view === "Portfolio Grid" && (
-          <div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
+          <div className="fade-in">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
               <div>
                 <h1 style={{ fontSize: 22, fontWeight: 800, marginBottom: 4 }}>Portfolio Grid</h1>
-                <p style={{ color: "#64748b", fontSize: 12, fontFamily: "'DM Mono',monospace" }}>{filtered.length} of {bids.length} bids · Click row to expand</p>
+                <p style={{ color: "#9CA3AF", fontSize: 12, fontFamily: "'DM Mono',monospace" }}>{filtered.length} bids</p>
               </div>
               <div style={{ display: "flex", gap: 10 }}>
-                <select value={filterStage} onChange={e => setFilterStage(e.target.value)} style={inp({ width: "auto" })}>
+                <select value={filterStage} onChange={e => setFilterStage(e.target.value)} style={{ ...inp({ width: "auto" }) }}>
                   <option value="All">All Stages</option>
                   {STAGES.map(s => <option key={s}>{s}</option>)}
                 </select>
-                <select value={filterGNG} onChange={e => setFilterGNG(e.target.value)} style={inp({ width: "auto" })}>
-                  <option value="All">All Go/No-Go</option>
+                <select value={filterGNG} onChange={e => setFilterGNG(e.target.value)} style={{ ...inp({ width: "auto" }) }}>
+                  <option value="All">All Outcomes</option>
                   {["GO","REVIEW","NO-GO","WON","LOST"].map(g => <option key={g}>{g}</option>)}
                 </select>
+                <button onClick={() => loadBids()} style={{ background: "#1e2435", color: "#9CA3AF", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, cursor: "pointer" }}>↻ Refresh</button>
               </div>
             </div>
 
-            <div style={{ background: "#141820", border: "1px solid #1e2535", borderRadius: 10, overflow: "hidden" }}>
+            <div style={{ background: "#111520", border: "1px solid #1e2435", borderRadius: 10, overflow: "hidden" }}>
               <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 1000 }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 1050 }}>
                   <thead>
-                    <tr style={{ background: "#0f1420", borderBottom: "1px solid #1e2535" }}>
+                    <tr style={{ background: "#0d1119", borderBottom: "1px solid #1e2435" }}>
                       {["ID","Opportunity","Authority","Stage","Due Date","Contract Val","Win%","EV","Pursuit Cost","Bid Cost%","Go/No-Go","Cap","Flags"].map(h => (
-                        <th key={h} style={{ padding: "10px 13px", textAlign: "left", color: "#64748b", fontFamily: "'DM Mono',monospace", fontSize: 10, fontWeight: 500, textTransform: "uppercase", letterSpacing: 0.8, whiteSpace: "nowrap" }}>{h}</th>
+                        <th key={h} style={{ padding: "10px 13px", textAlign: "left", color: "#9CA3AF", fontFamily: "'DM Mono',monospace", fontSize: 10, fontWeight: 500, textTransform: "uppercase", letterSpacing: 0.8, whiteSpace: "nowrap" }}>{h}</th>
                       ))}
                     </tr>
                   </thead>
@@ -633,89 +763,101 @@ function App() {
                     {filtered.map(b => (
                       <React.Fragment key={b.id}>
                         <tr
-                          onClick={() => setSelectedBid(selectedBid && selectedBid.id === b.id ? null : b)}
-                          style={{ borderBottom: "1px solid #1a2030", cursor: "pointer", background: selectedBid && selectedBid.id === b.id ? "#1a2535" : "transparent" }}
-                          onMouseEnter={e => { if (!selectedBid || selectedBid.id !== b.id) e.currentTarget.style.background = "#141e2a"; }}
-                          onMouseLeave={e => { if (!selectedBid || selectedBid.id !== b.id) e.currentTarget.style.background = "transparent"; }}>
-                          <td style={{ padding: "11px 13px", fontFamily: "'DM Mono',monospace", color: "#64748b", fontSize: 11 }}>{b.id}</td>
-                          <td style={{ padding: "11px 13px", fontWeight: 600 }}>{b.name}</td>
-                          <td style={{ padding: "11px 13px", color: "#94a3b8" }}>{b.authority}</td>
+                          onClick={() => setSelectedBid(selectedBid?.id === b.id ? null : b)}
+                          style={{ borderBottom: "1px solid #151d2e", cursor: "pointer", background: selectedBid?.id === b.id ? "#161f30" : "transparent", transition: "background 0.15s" }}
+                          onMouseEnter={e => { if (selectedBid?.id !== b.id) e.currentTarget.style.background = "#121a27"; }}
+                          onMouseLeave={e => { if (selectedBid?.id !== b.id) e.currentTarget.style.background = "transparent"; }}>
+                          <td style={{ padding: "11px 13px", fontFamily: "'DM Mono',monospace", color: "#9CA3AF", fontSize: 11 }}>{b.id}</td>
+                          <td style={{ padding: "11px 13px", fontWeight: 600, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.name}</td>
+                          <td style={{ padding: "11px 13px", color: "#9CA3AF" }}>{b.authority}</td>
                           <td style={{ padding: "11px 13px" }}><Badge label={b.stage} color={StageColors[b.stage] || "#64748b"} small /></td>
-                          <td style={{ padding: "11px 13px", fontFamily: "'DM Mono',monospace" }}>{fmtDate(b.bidEnd)}</td>
+                          <td style={{ padding: "11px 13px", fontFamily: "'DM Mono',monospace", fontSize: 11 }}>{fmtDate(b.bidEnd)}</td>
                           <td style={{ padding: "11px 13px" }}>{fmtCurrency(b.contractValue)}</td>
                           <td style={{ padding: "11px 13px" }}>{b.winProb}%</td>
-                          <td style={{ padding: "11px 13px", color: "#22c55e" }}>{fmtCurrency(b.ev)}</td>
-                          <td style={{ padding: "11px 13px", color: "#f59e0b" }}>{fmtCurrency(b.bidPursuitCost)}</td>
-                          <td style={{ padding: "11px 13px", fontFamily: "'DM Mono',monospace", color: b.bidCostPct > MAX_BID_COST_PCT ? "#ef4444" : "#94a3b8" }}>
+                          <td style={{ padding: "11px 13px", color: "#4BE8A0" }}>{fmtCurrency(b.ev)}</td>
+                          <td style={{ padding: "11px 13px", color: "#E8B84B" }}>{fmtCurrency(b.bidPursuitCost)}</td>
+                          <td style={{ padding: "11px 13px", fontFamily: "'DM Mono',monospace", color: b.bidCostPct > settings.maxBidCostPct ? "#E84B7A" : "#9CA3AF" }}>
                             {b.bidCostPct > 99 ? "—" : b.bidCostPct.toFixed(1) + "%"}
                           </td>
                           <td style={{ padding: "11px 13px" }}><Badge label={b.goNoGo} color={GOColors[b.goNoGo] || "#64748b"} /></td>
                           <td style={{ padding: "11px 13px" }}><Badge label={b.capacityStatus} color={CapColor[b.capacityStatus]} small /></td>
                           <td style={{ padding: "11px 13px" }}>
-                            {b.flags.length ? <span style={{ color: "#f59e0b", fontSize: 11 }}>⚠ {b.flags.length}</span> : <span style={{ color: "#374151" }}>—</span>}
+                            {b.flags.length ? <span style={{ color: "#E8B84B", fontSize: 11 }}>⚠ {b.flags.length}</span> : <span style={{ color: "#1e2435" }}>—</span>}
                           </td>
                         </tr>
-                        {selectedBid && selectedBid.id === b.id && (
+
+                        {selectedBid?.id === b.id && (
                           <tr>
-                            <td colSpan={13} style={{ background: "#0d1119", borderBottom: "1px solid #1e2535", padding: 0 }}>
-                              <div style={{ padding: "20px 24px", display: "flex", gap: 28, flexWrap: "wrap" }}>
+                            <td colSpan={13} style={{ background: "#0d1119", borderBottom: "1px solid #1e2435", padding: 0 }}>
+                              <div className="fade-in" style={{ padding: "20px 24px", display: "flex", gap: 28, flexWrap: "wrap" }}>
+
+                                {/* Bid details */}
                                 <div style={{ flex: 1, minWidth: 200 }}>
-                                  <div style={{ fontSize: 10, color: "#64748b", fontFamily: "'DM Mono',monospace", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>Bid Details</div>
-                                  {[["Region", b.region], ["Decision Owner", b.decisionOwner || "—"], ["Compliance", b.compliance], ["Strategic Score", `${b.strategicScore} / 5`], ["Total Bid Hours", `${b.totalHours.toLocaleString()} hrs`], ["Blended Rate", `£${BLENDED_RATE}/hr`]].map(([k, v]) => (
+                                  <div style={{ fontSize: 10, color: "#9CA3AF", fontFamily: "'DM Mono',monospace", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>Bid Details</div>
+                                  {[["Region", b.region], ["Decision Owner", b.decisionOwner || "—"], ["Compliance", b.compliance], ["Strategic Score", `${b.strategicScore} / 5`], ["Total Bid Hours", `${b.totalHours.toLocaleString()} hrs`], ["Blended Rate", `£${settings.blendedRate}/hr`]].map(([k, v]) => (
                                     <div key={k} style={{ fontSize: 12, marginBottom: 5 }}>
-                                      <span style={{ color: "#64748b" }}>{k}: </span>
+                                      <span style={{ color: "#9CA3AF" }}>{k}: </span>
                                       <span style={{ fontFamily: "'DM Mono',monospace" }}>{v}</span>
                                     </div>
                                   ))}
                                 </div>
+
+                                {/* Inline edit: Stage + Award Date */}
                                 <div style={{ flex: 1, minWidth: 220 }}>
-                                  <div style={{ fontSize: 10, color: "#64748b", fontFamily: "'DM Mono',monospace", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>Update Bid</div>
-                                  <div style={{ marginBottom: 10 }}>
-                                    <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>STAGE</div>
+                                  <div style={{ fontSize: 10, color: "#9CA3AF", fontFamily: "'DM Mono',monospace", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>Update Bid</div>
+                                  <div style={{ marginBottom: 12 }}>
+                                    <label style={lbl()}>Stage</label>
                                     <select
                                       value={b.stage}
                                       onClick={e => e.stopPropagation()}
                                       onChange={e => {
                                         const updated = { ...b, stage: e.target.value };
-                                        setBids(prev => prev.map(x => x.id === b.id ? updated : x));
-                                        updateBidInSheet(updated);
+                                        setBids(prev => prev.map(x => x.id === b.id ? { ...x, stage: e.target.value } : x));
+                                        setSelectedBid(updated);
+                                        updateBidInExcel(updated);
                                       }}
-                                      style={{ background: "#1a2030", border: "1px solid #2a3348", borderRadius: 6, color: "#f0f2f8", padding: "6px 10px", fontSize: 12, width: "100%", cursor: "pointer" }}>
-                                      {["Intake","Qualified","Bid","Won","Lost"].map(s => <option key={s}>{s}</option>)}
+                                      style={{ ...inp(), cursor: "pointer" }}>
+                                      {STAGES.map(s => <option key={s}>{s}</option>)}
                                     </select>
                                   </div>
                                   <div style={{ marginBottom: 10 }}>
-                                    <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>AWARD DATE</div>
+                                    <label style={lbl()}>Award Date</label>
                                     <input
                                       type="date"
                                       value={b.awardDate || ""}
                                       onClick={e => e.stopPropagation()}
                                       onChange={e => {
                                         const updated = { ...b, awardDate: e.target.value };
-                                        setBids(prev => prev.map(x => x.id === b.id ? updated : x));
-                                        updateBidInSheet(updated);
+                                        setBids(prev => prev.map(x => x.id === b.id ? { ...x, awardDate: e.target.value } : x));
+                                        setSelectedBid(updated);
+                                        updateBidInExcel(updated);
                                       }}
-                                      style={{ background: "#1a2030", border: "1px solid #2a3348", borderRadius: 6, color: "#f0f2f8", padding: "6px 10px", fontSize: 12, width: "100%", colorScheme: "dark", cursor: "pointer" }} />
+                                      style={inp()} />
                                   </div>
                                   {b.stage === "Won" && b.mobilisationStart && (
-                                    <div>
-                                      <div style={{ fontSize: 11, color: "#4be8a0", marginBottom: 2 }}>Mob Start: {fmtDate(b.mobilisationStart)}</div>
-                                      <div style={{ fontSize: 11, color: "#4be8a0" }}>Go-Live: {fmtDate(b.goLiveDate)}</div>
+                                    <div style={{ padding: "8px 10px", background: "#111520", borderRadius: 6, border: "1px solid #1e2435" }}>
+                                      <div style={{ fontSize: 11, color: "#4BE8A0", fontFamily: "'DM Mono',monospace", marginBottom: 3 }}>Mob Start: {fmtDate(b.mobilisationStart)}</div>
+                                      <div style={{ fontSize: 11, color: "#4BE8A0", fontFamily: "'DM Mono',monospace" }}>Go-Live: {fmtDate(b.goLiveDate)}</div>
                                     </div>
                                   )}
                                 </div>
+
+                                {/* Flags */}
                                 {b.flags.length > 0 && (
                                   <div style={{ flex: 1, minWidth: 180 }}>
-                                    <div style={{ fontSize: 10, color: "#f59e0b", fontFamily: "'DM Mono',monospace", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>⚠ Decision Flags</div>
-                                    {b.flags.map(f => <div key={f} style={{ fontSize: 12, color: "#f59e0b", marginBottom: 5 }}>• {f}</div>)}
+                                    <div style={{ fontSize: 10, color: "#E8B84B", fontFamily: "'DM Mono',monospace", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>⚠ Decision Flags</div>
+                                    {b.flags.map(f => <div key={f} style={{ fontSize: 12, color: "#E8B84B", marginBottom: 5 }}>• {f}</div>)}
                                   </div>
                                 )}
+
+                                {/* Notes */}
                                 {b.notes && (
                                   <div style={{ flex: 2, minWidth: 180 }}>
-                                    <div style={{ fontSize: 10, color: "#64748b", fontFamily: "'DM Mono',monospace", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>Notes</div>
-                                    <div style={{ fontSize: 13, color: "#94a3b8", fontStyle: "italic" }}>{b.notes}</div>
+                                    <div style={{ fontSize: 10, color: "#9CA3AF", fontFamily: "'DM Mono',monospace", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>Notes</div>
+                                    <div style={{ fontSize: 13, color: "#9CA3AF", fontStyle: "italic" }}>{b.notes}</div>
                                   </div>
                                 )}
+
                               </div>
                             </td>
                           </tr>
@@ -723,7 +865,7 @@ function App() {
                       </React.Fragment>
                     ))}
                     {filtered.length === 0 && (
-                      <tr><td colSpan={13} style={{ padding: "20px 16px", color: "#64748b", fontSize: 13 }}>No bids match your filters.</td></tr>
+                      <tr><td colSpan={13} style={{ padding: "28px 16px", color: "#9CA3AF", fontSize: 13, textAlign: "center" }}>No bids match your filters.</td></tr>
                     )}
                   </tbody>
                 </table>
@@ -734,85 +876,70 @@ function App() {
 
         {/* ═══ ADD BID ═══ */}
         {view === "Add Bid" && (
-          <div style={{ maxWidth: 760 }}>
+          <div className="fade-in" style={{ maxWidth: 760 }}>
             <h1 style={{ fontSize: 22, fontWeight: 800, marginBottom: 6 }}>Intake — New Bid</h1>
-            <p style={{ color: "#64748b", fontSize: 13, marginBottom: 28, fontFamily: "'DM Mono',monospace" }}>
-              Complete intake fields. Go/No-Go and capacity calculated live. Submitted bids are saved directly to Google Sheets.
+            <p style={{ color: "#9CA3AF", fontSize: 12, fontFamily: "'DM Mono',monospace", marginBottom: 28 }}>
+              Complete intake fields. Go/No-Go calculated live. Saved directly to OneDrive Excel.
             </p>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18, background: "#141820", border: "1px solid #1e2535", borderRadius: 12, padding: 28, marginBottom: 20 }}>
-              {[
-                { key: "name", label: "Opportunity Name", type: "text", full: true },
-                { key: "authority", label: "Authority / Client", type: "text" },
-                { key: "region", label: "Region", type: "select", opts: REGIONS },
-                { key: "stage", label: "Stage", type: "select", opts: STAGES },
-                { key: "decisionOwner", label: "Decision Owner", type: "text" },
-                { key: "compliance", label: "Compliance", type: "select", opts: COMPLIANCE_OPTS },
-                { key: "bidStart", label: "Bid Start Date", type: "date" },
-                { key: "bidDurationWeeks", label: "Bid Duration (Weeks)", type: "number" },
-                { key: "contractValue", label: "Est. Contract Value (£)", type: "number" },
-                { key: "winProb", label: "Win Probability (%)", type: "number" },
-                { key: "targetMargin", label: "Target Margin (%)", type: "number" },
-                { key: "strategicScore", label: "Strategic Score (1–5)", type: "number" },
-                { key: "notes", label: "Notes", type: "text", full: true },
-              ].map(({ key, label, type, opts, full }) => (
-                <div key={key} style={full ? { gridColumn: "1 / -1" } : {}}>
-                  <label style={lbl}>{label}</label>
-                  {type === "select"
-                    ? <select value={newBid[key]} onChange={e => setNewBid(p => ({ ...p, [key]: e.target.value }))} style={inp()}>{opts.map(o => <option key={o}>{o}</option>)}</select>
-                    : <input type={type} value={newBid[key]} onChange={e => setNewBid(p => ({ ...p, [key]: e.target.value }))} style={inp()} />}
-                </div>
-              ))}
-            </div>
-
-            {/* Live preview */}
-            {newBid.contractValue && newBid.winProb && (() => {
-              const preview = calcBid({
-                ...newBid, id: "PREVIEW",
-                contractValue: Number(newBid.contractValue),
-                winProb: Number(newBid.winProb),
-                targetMargin: Number(newBid.targetMargin),
-                bidDurationWeeks: Number(newBid.bidDurationWeeks)
-              }, bids);
-              const gngColor = GOColors[preview.goNoGo] || "#64748b";
-              return (
-                <div style={{ background: "#141820", border: `1px solid ${gngColor}44`, borderRadius: 10, padding: "18px 24px", marginBottom: 20 }}>
-                  <div style={{ fontSize: 10, color: "#64748b", fontFamily: "'DM Mono',monospace", marginBottom: 12, textTransform: "uppercase", letterSpacing: 1 }}>Live Viability Preview</div>
-                  <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "center" }}>
-                    <div>
-                      <div style={{ fontSize: 10, color: "#64748b", marginBottom: 4 }}>OUTCOME</div>
-                      <Badge label={preview.goNoGo} color={gngColor} />
-                    </div>
-                    <div style={{ fontSize: 12 }}><span style={{ color: "#64748b" }}>EV: </span><span style={{ color: "#22c55e", fontFamily: "'DM Mono',monospace" }}>{fmtGBP(preview.ev)}</span></div>
-                    <div style={{ fontSize: 12 }}><span style={{ color: "#64748b" }}>Pursuit Cost: </span><span style={{ color: "#f59e0b", fontFamily: "'DM Mono',monospace" }}>{fmtGBP(preview.bidPursuitCost)}</span></div>
-                    <div style={{ fontSize: 12 }}><span style={{ color: "#64748b" }}>Due: </span><span style={{ fontFamily: "'DM Mono',monospace" }}>{fmtDate(preview.bidEnd)}</span></div>
-                    <div style={{ fontSize: 12 }}><span style={{ color: "#64748b" }}>Capacity: </span><Badge label={preview.capacityStatus} color={CapColor[preview.capacityStatus]} small /></div>
-                    {preview.flags.map(f => <span key={f} style={{ fontSize: 11, color: "#f59e0b" }}>⚠ {f}</span>)}
+            <form onSubmit={handleAddBid}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 20 }}>
+                {[
+                  { key: "name", label: "Opportunity Name", type: "text", full: true },
+                  { key: "authority", label: "Authority / Client", type: "text" },
+                  { key: "region", label: "Region", type: "select", opts: REGIONS },
+                  { key: "stage", label: "Stage", type: "select", opts: STAGES },
+                  { key: "decisionOwner", label: "Decision Owner", type: "text" },
+                  { key: "compliance", label: "Compliance", type: "select", opts: COMPLIANCE_OPTS },
+                  { key: "bidStart", label: "Bid Start Date", type: "date" },
+                  { key: "bidDurationWeeks", label: "Bid Duration (Weeks)", type: "number" },
+                  { key: "contractValue", label: "Est. Contract Value (£)", type: "number" },
+                  { key: "winProb", label: "Win Probability (%)", type: "number" },
+                  { key: "targetMargin", label: "Target Margin (%)", type: "number" },
+                  { key: "strategicScore", label: "Strategic Score (1–5)", type: "number" },
+                  { key: "notes", label: "Notes", type: "text", full: true },
+                ].map(({ key, label, type, opts, full }) => (
+                  <div key={key} style={full ? { gridColumn: "1 / -1" } : {}}>
+                    <label style={lbl()}>{label}</label>
+                    {type === "select"
+                      ? <select value={newBid[key]} onChange={e => setNewBid(p => ({ ...p, [key]: e.target.value }))} style={inp()}>{opts.map(o => <option key={o}>{o}</option>)}</select>
+                      : <input type={type} value={newBid[key]} onChange={e => setNewBid(p => ({ ...p, [key]: e.target.value }))} style={inp()} />}
                   </div>
-                </div>
-              );
-            })()}
+                ))}
+              </div>
 
-            <button
-              onClick={handleAddBid}
-              disabled={saving}
-              style={{
-                background: saving ? "#1e2535" : "linear-gradient(135deg,#3b82f6,#6366f1)",
-                color: saving ? "#64748b" : "#fff",
-                border: "none", borderRadius: 8, padding: "12px 28px",
-                fontSize: 14, fontWeight: 700, cursor: saving ? "not-allowed" : "pointer",
-                fontFamily: "'Syne',sans-serif"
-              }}>
-              {saving ? "Saving to Google Sheets..." : "Add to Portfolio → Save to Sheet"}
-            </button>
+              {/* Live preview */}
+              {newBid.contractValue && newBid.winProb && (() => {
+                const preview = calcBid({ ...newBid, id: "PREVIEW", contractValue: Number(newBid.contractValue), winProb: Number(newBid.winProb), targetMargin: Number(newBid.targetMargin), bidDurationWeeks: Number(newBid.bidDurationWeeks), awardDate: "" }, bids, settings);
+                const gngColor = GOColors[preview.goNoGo] || "#64748b";
+                return (
+                  <div style={{ background: "#0d1119", border: `1px solid ${gngColor}44`, borderRadius: 10, padding: "18px 24px", marginBottom: 20 }}>
+                    <div style={{ fontSize: 10, color: "#9CA3AF", fontFamily: "'DM Mono',monospace", marginBottom: 12, textTransform: "uppercase", letterSpacing: 1 }}>Live Viability Preview</div>
+                    <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "center" }}>
+                      <div><div style={{ fontSize: 10, color: "#9CA3AF", marginBottom: 4 }}>OUTCOME</div><Badge label={preview.goNoGo} color={gngColor} /></div>
+                      <div style={{ fontSize: 12 }}><span style={{ color: "#9CA3AF" }}>EV: </span><span style={{ color: "#4BE8A0", fontFamily: "'DM Mono',monospace" }}>{fmtGBP(preview.ev)}</span></div>
+                      <div style={{ fontSize: 12 }}><span style={{ color: "#9CA3AF" }}>Pursuit Cost: </span><span style={{ color: "#E8B84B", fontFamily: "'DM Mono',monospace" }}>{fmtGBP(preview.bidPursuitCost)}</span></div>
+                      <div style={{ fontSize: 12 }}><span style={{ color: "#9CA3AF" }}>Due: </span><span style={{ fontFamily: "'DM Mono',monospace" }}>{fmtDate(preview.bidEnd)}</span></div>
+                      <div style={{ fontSize: 12 }}><span style={{ color: "#9CA3AF" }}>Capacity: </span><Badge label={preview.capacityStatus} color={CapColor[preview.capacityStatus]} small /></div>
+                      {preview.flags.map(f => <span key={f} style={{ fontSize: 11, color: "#E8B84B" }}>⚠ {f}</span>)}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <button type="submit" style={{ background: "linear-gradient(135deg,#4B9FE8,#A04BE8)", color: "#fff", border: "none", borderRadius: 8, padding: "13px 28px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
+                Add to Portfolio → Save to OneDrive
+              </button>
+            </form>
           </div>
         )}
+
       </div>
     </div>
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+ReactDOM.render(<App />, document.getElementById("root"));
 </script>
 </body>
 </html>
