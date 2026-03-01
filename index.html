@@ -7,8 +7,9 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
-<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js" crossorigin="anonymous"></script>
-<script>if(!window.msal){document.write('<script src="https://unpkg.com/@azure/msal-browser@2.38.3/lib/msal-browser.min.js"><\/script>');}</script>
+<script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/lib/msal-browser.min.js"
+  onerror="(function(){var s=document.createElement('script');s.src='https://unpkg.com/@azure/msal-browser@2.38.3/lib/msal-browser.min.js';document.head.appendChild(s);})()">
+</script>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -44,7 +45,7 @@ let EXCEL_FILE_ID = null; // resolved automatically on first load
 
 // ── MSAL setup ──
 // MSAL global detection - different CDNs expose different globals
-const msalLib = window.msal || window.msalBrowser || window["msal-browser"];
+const msalLib = window.msalBrowser || window["msal-browser"] || window.msal;
 const msalConfig = {
   auth: {
     clientId: MS_CLIENT_ID,
@@ -379,37 +380,10 @@ function App() {
     contractValue: "", winProb: "", targetMargin: "", strategicScore: 3,
     compliance: "Pass", decisionOwner: "", notes: ""
   });
+  const [editDraft, setEditDraft] = useState(null);   // tracks edits in expanded row
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null); // id of bid pending delete confirm
 
-  // Init MSAL
-  useEffect(() => {
-    // client ID is set
-    try {
-      if (!msalLib || !msalLib.PublicClientApplication) {
-        throw new Error("MSAL library not loaded - check CDN");
-      }
-      msalRef.current = new msalLib.PublicClientApplication(msalConfig);
-      msalRef.current.initialize().then(() => {
-        // Handle redirect response
-        msalRef.current.handleRedirectPromise().then(resp => {
-          if (resp) finishLogin(resp);
-          else {
-            // Check for existing session
-            const accounts = msalRef.current.getAllAccounts();
-            if (accounts.length > 0) silentLogin(accounts[0]);
-          }
-        });
-      });
-    } catch (e) { console.error("MSAL init error:", e); }
-  }, []);
-
-  // Guard: if MSAL didn't load, surface a clear error rather than cryptic TypeError
-  if (!msalLib) {
-    console.error("MSAL library failed to load from CDN");
-    setAuthError("Authentication library failed to load. Please hard-refresh (Ctrl+Shift+R) and try again.");
-    setAuthState("idle");
-    return;
-  }
-
+  // silentLogin must be defined before useEffect references it
   async function silentLogin(account) {
     try {
       const resp = await msalRef.current.acquireTokenSilent({ scopes: TOKEN_SCOPES, account });
@@ -418,6 +392,33 @@ function App() {
       console.log("Silent login failed, user must sign in again");
     }
   }
+
+  // Init MSAL
+  useEffect(() => {
+    // client ID is set
+    try {
+      if (!msalLib || !msalLib.PublicClientApplication) {
+        setAuthError("Authentication library failed to load. Hard-refresh (Ctrl+Shift+R) and try again.");
+        return;
+      }
+      msalRef.current = new msalLib.PublicClientApplication(msalConfig);
+      msalRef.current.initialize().then(() => {
+        // Handle redirect response
+        msalRef.current.handleRedirectPromise().then(resp => {
+          if (resp) finishLogin(resp);
+          else {
+            // Only auto-resume if user hasn't explicitly signed out
+            const signedOut = localStorage.getItem("bidPortfolio_signedOut");
+            if (!signedOut) {
+              const accounts = msalRef.current.getAllAccounts();
+              if (accounts.length > 0) silentLogin(accounts[0]);
+            }
+          }
+        });
+      });
+    } catch (e) { console.error("MSAL init error:", e); }
+  }, []);
+
 
   async function finishLogin(resp) {
     const token = resp.accessToken;
@@ -441,6 +442,7 @@ function App() {
     }
     setAuthState("signing-in");
     setAuthError("");
+    localStorage.removeItem("bidPortfolio_signedOut"); // clear flag on explicit sign-in
     try {
       const resp = await msalRef.current.loginPopup({ scopes: TOKEN_SCOPES });
       // After login, acquire token
@@ -478,17 +480,23 @@ function App() {
   }
 
   function handleSignOut() {
-    if (msalRef.current) {
-      try {
-        const accounts = msalRef.current.getAllAccounts();
-        if (accounts.length) msalRef.current.clearCache();
-      } catch(e) {}
-    }
+    // Wipe MSAL tokens from localStorage manually
+    try {
+      if (msalRef.current) msalRef.current.clearCache();
+    } catch(e) {}
+    // Remove all MSAL keys from localStorage
+    Object.keys(localStorage).forEach(k => {
+      if (k.includes("msal") || k.includes(MS_CLIENT_ID)) {
+        localStorage.removeItem(k);
+      }
+    });
+    // Set explicit signed-out flag so silent login doesn't auto-resume
+    localStorage.setItem("bidPortfolio_signedOut", "true");
+    sessionStorage.clear();
     setAccessToken(null);
     setUserInfo(null);
     setBids([]);
     setAuthState("idle");
-    sessionStorage.clear();
   }
 
   // ── Excel API calls ──
@@ -793,7 +801,12 @@ function App() {
                     {filtered.map(b => (
                       <React.Fragment key={b.id}>
                         <tr
-                          onClick={() => setSelectedBid(selectedBid?.id === b.id ? null : b)}
+                          onClick={() => {
+                          const next = selectedBid?.id === b.id ? null : b;
+                          setSelectedBid(next);
+                          setEditDraft(next ? { ...next } : null);
+                          setConfirmDeleteId(null);
+                        }}
                           style={{ borderBottom: "1px solid #151d2e", cursor: "pointer", background: selectedBid?.id === b.id ? "#161f30" : "transparent", transition: "background 0.15s" }}
                           onMouseEnter={e => { if (selectedBid?.id !== b.id) e.currentTarget.style.background = "#121a27"; }}
                           onMouseLeave={e => { if (selectedBid?.id !== b.id) e.currentTarget.style.background = "transparent"; }}>
@@ -821,10 +834,8 @@ function App() {
                             <td colSpan={13} style={{ background: "#0d1119", borderBottom: "1px solid #1e2435", padding: 0 }}>
                               <div className="fade-in" style={{ padding: "20px 24px", display: "flex", gap: 28, flexWrap: "wrap" }}>
 
-                                {/* Full inline edit form */}
-                                {(() => {
-                                  const [editDraft, setEditDraft] = React.useState({ ...b });
-                                  const [confirmDelete, setConfirmDelete] = React.useState(false);
+                                {/* Full inline edit form — state lives at App level */}
+                                {editDraft && editDraft.id === b.id && (() => {
                                   const isDirty = JSON.stringify(editDraft) !== JSON.stringify(b);
 
                                   async function handleSaveEdit(e) {
@@ -839,6 +850,7 @@ function App() {
                                     };
                                     setBids(prev => prev.map(x => x.id === updated.id ? updated : x));
                                     setSelectedBid(updated);
+                                    setEditDraft(updated);
                                     await updateBidInExcel(updated);
                                   }
 
@@ -847,14 +859,15 @@ function App() {
                                     await deleteBidFromExcel(b);
                                     setBids(prev => prev.filter(x => x.id !== b.id).map((x, i) => ({ ...x, _rowIndex: i })));
                                     setSelectedBid(null);
-                                    setConfirmDelete(false);
+                                    setEditDraft(null);
+                                    setConfirmDeleteId(null);
                                   }
 
                                   const fld = (key, label, type, opts) => (
                                     <div key={key} onClick={e => e.stopPropagation()}>
                                       <label style={lbl()}>{label}</label>
                                       {type === "select"
-                                        ? <select value={editDraft[key]} onChange={e => setEditDraft(p => ({ ...p, [key]: e.target.value }))} style={{ ...inp(), fontSize: 12 }}>
+                                        ? <select value={editDraft[key] || ""} onChange={e => setEditDraft(p => ({ ...p, [key]: e.target.value }))} style={{ ...inp(), fontSize: 12 }}>
                                             {opts.map(o => <option key={o}>{o}</option>)}
                                           </select>
                                         : <input type={type} value={editDraft[key] || ""} onChange={e => setEditDraft(p => ({ ...p, [key]: e.target.value }))} style={{ ...inp(), fontSize: 12 }} />
@@ -881,7 +894,6 @@ function App() {
                                         {fld("notes", "Notes", "text")}
                                       </div>
 
-                                      {/* Mobilisation dates if Won */}
                                       {b.stage === "Won" && b.mobilisationStart && (
                                         <div style={{ display: "flex", gap: 16, marginBottom: 14, padding: "8px 12px", background: "#111520", borderRadius: 6, border: "1px solid #1e2435" }}>
                                           <span style={{ fontSize: 11, color: "#4BE8A0", fontFamily: "'DM Mono',monospace" }}>Mob Start: {fmtDate(b.mobilisationStart)}</span>
@@ -889,14 +901,12 @@ function App() {
                                         </div>
                                       )}
 
-                                      {/* Flags */}
                                       {b.flags.length > 0 && (
                                         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
                                           {b.flags.map(f => <span key={f} style={{ fontSize: 11, color: "#E8B84B" }}>⚠ {f}</span>)}
                                         </div>
                                       )}
 
-                                      {/* Action buttons */}
                                       <div style={{ display: "flex", gap: 10, alignItems: "center" }} onClick={e => e.stopPropagation()}>
                                         <button
                                           onClick={handleSaveEdit}
@@ -904,12 +914,12 @@ function App() {
                                           style={{ background: isDirty ? "#4B9FE8" : "#1e2435", color: isDirty ? "#fff" : "#4B5563", border: "none", borderRadius: 7, padding: "8px 18px", fontSize: 12, fontWeight: 700, cursor: isDirty ? "pointer" : "not-allowed", transition: "all 0.2s" }}>
                                           Save Changes
                                         </button>
-                                        {!confirmDelete
-                                          ? <button onClick={e => { e.stopPropagation(); setConfirmDelete(true); }} style={{ background: "transparent", color: "#E84B7A", border: "1px solid #E84B7A33", borderRadius: 7, padding: "8px 16px", fontSize: 12, cursor: "pointer" }}>Delete Bid</button>
+                                        {confirmDeleteId !== b.id
+                                          ? <button onClick={e => { e.stopPropagation(); setConfirmDeleteId(b.id); }} style={{ background: "transparent", color: "#E84B7A", border: "1px solid #E84B7A33", borderRadius: 7, padding: "8px 16px", fontSize: 12, cursor: "pointer" }}>Delete Bid</button>
                                           : <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                                               <span style={{ fontSize: 12, color: "#E84B7A" }}>Confirm delete?</span>
                                               <button onClick={handleDelete} style={{ background: "#E84B7A", color: "#fff", border: "none", borderRadius: 7, padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Yes, delete</button>
-                                              <button onClick={e => { e.stopPropagation(); setConfirmDelete(false); }} style={{ background: "transparent", color: "#9CA3AF", border: "1px solid #1e2435", borderRadius: 7, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>Cancel</button>
+                                              <button onClick={e => { e.stopPropagation(); setConfirmDeleteId(null); }} style={{ background: "transparent", color: "#9CA3AF", border: "1px solid #1e2435", borderRadius: 7, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>Cancel</button>
                                             </div>
                                         }
                                       </div>
