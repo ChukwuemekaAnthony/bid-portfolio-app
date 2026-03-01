@@ -216,9 +216,9 @@ function LoginScreen({ onSignIn, error }) {
 
 // ── Main App ──
 function App() {
-  const [authState, setAuthState] = useState(() => sessionStorage.getItem("gtoken") ? "authenticated" : "idle");
+  const [authState, setAuthState] = useState("idle");
   const [authError, setAuthError] = useState("");
-  const [accessToken, setAccessToken] = useState(() => sessionStorage.getItem("gtoken") || null);
+  const [accessToken, setAccessToken] = useState(null);
   const [userInfo, setUserInfo] = useState(null);
   const [bids, setBids] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -239,19 +239,31 @@ function App() {
   const tokenClient = React.useRef(null);
 
   useEffect(() => {
-    // Load gapi
-    window.gapi && window.gapi.load("client", async () => {
-      await window.gapi.client.init({});
-      await window.gapi.client.load("https://sheets.googleapis.com/$discovery/rest?version=v4");
-      // Auto-load bids if token restored from session
-      const saved = sessionStorage.getItem("gtoken");
-      if (saved) {
-        window.gapi.client.setToken({ access_token: saved });
-        setAccessToken(saved);
-        setAuthState("authenticated");
-        loadBids(saved);
-      }
-    });
+    // Load gapi then restore session if token exists
+    const initGapi = () => {
+      window.gapi.load("client", async () => {
+        await window.gapi.client.init({});
+        await window.gapi.client.load("https://sheets.googleapis.com/$discovery/rest?version=v4");
+        const saved = sessionStorage.getItem("gtoken");
+        if (saved) {
+          window.gapi.client.setToken({ access_token: saved });
+          setAccessToken(saved);
+          setAuthState("authenticated");
+          loadBids(saved);
+        }
+      });
+    };
+    // Wait for gapi script to be ready
+    if (window.gapi) {
+      initGapi();
+    } else {
+      const interval = setInterval(() => {
+        if (window.gapi) {
+          clearInterval(interval);
+          initGapi();
+        }
+      }, 100);
+    }
   }, []);
 
   function handleSignIn() {
@@ -415,13 +427,6 @@ function App() {
   const lbl = { fontSize: 11, color: "#64748b", fontFamily: "'DM Mono',monospace", textTransform: "uppercase", letterSpacing: 1, marginBottom: 4, display: "block" };
 
   // ── Auth screens ──
-  // Re-check session on every render in case of timing issue
-  const savedToken = sessionStorage.getItem("gtoken");
-  if (authState !== "authenticated" && savedToken) {
-    setAuthState("authenticated");
-    return null;
-  }
-
   if (authState === "idle" || authState === "signing-in" || authState === "error") {
     return <LoginScreen onSignIn={handleSignIn} error={authError} />;
   }
