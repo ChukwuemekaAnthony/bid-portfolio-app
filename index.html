@@ -49,7 +49,7 @@ const msalConfig = {
     authority: "https://login.microsoftonline.com/consumers",
     redirectUri: window.location.origin + window.location.pathname,
   },
-  cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: false },
+  cache: { cacheLocation: "localStorage", storeAuthStateInCookie: true },
 };
 
 const TOKEN_SCOPES = ["User.Read", "Files.ReadWrite"];
@@ -463,45 +463,39 @@ function App() {
 
   function handleSignOut() {
     if (msalRef.current) {
-      const accounts = msalRef.current.getAllAccounts();
-      if (accounts.length) msalRef.current.logoutPopup({ account: accounts[0] });
+      try {
+        const accounts = msalRef.current.getAllAccounts();
+        if (accounts.length) msalRef.current.clearCache();
+      } catch(e) {}
     }
     setAccessToken(null);
     setUserInfo(null);
     setBids([]);
     setAuthState("idle");
+    sessionStorage.clear();
   }
 
   // ── Excel API calls ──
   async function resolveFileId(t) {
     if (EXCEL_FILE_ID) return EXCEL_FILE_ID;
-    // Search by base name without extension
-    const baseName = EXCEL_FILE_NAME.replace(".xlsx","");
+    const baseName = EXCEL_FILE_NAME.replace(".xlsx","").toLowerCase();
+    // List all files in OneDrive root
     const resp = await fetch(
-      `https://graph.microsoft.com/v1.0/me/drive/root/search(q='${baseName}')`,
+      `https://graph.microsoft.com/v1.0/me/drive/root/children?$top=100`,
       { headers: { Authorization: `Bearer ${t}` } }
     );
     const data = await resp.json();
-    console.log("File search results:", JSON.stringify((data.value||[]).map(f=>({name:f.name,id:f.id}))));
-    if (data.error) throw new Error("Search error: " + data.error.message);
-    // Match xlsx files containing the base name
-    const file = (data.value || []).find(f =>
+    if (data.error) throw new Error("Drive error: " + data.error.message);
+    const files = data.value || [];
+    console.log("OneDrive root files:", files.map(f => f.name).join(", "));
+    const file = files.find(f =>
       f.name === EXCEL_FILE_NAME ||
-      f.name === baseName ||
-      f.name.toLowerCase().includes(baseName.toLowerCase())
+      f.name.toLowerCase() === baseName + ".xlsx" ||
+      f.name.toLowerCase() === baseName
     );
-    if (!file) {
-      // List all files as fallback
-      const allResp = await fetch(
-        `https://graph.microsoft.com/v1.0/me/drive/root/children`,
-        { headers: { Authorization: `Bearer ${t}` } }
-      );
-      const allData = await allResp.json();
-      console.log("All root files:", JSON.stringify((allData.value||[]).map(f=>f.name)));
-      throw new Error(`File "${EXCEL_FILE_NAME}" not found. Check console for available files.`);
-    }
+    if (!file) throw new Error(`File "${EXCEL_FILE_NAME}" not found. Found: ${files.map(f=>f.name).join(", ")}`);
     EXCEL_FILE_ID = file.id;
-    console.log("Resolved file ID:", EXCEL_FILE_ID, "name:", file.name);
+    console.log("Resolved file:", file.name, "ID:", EXCEL_FILE_ID);
     return EXCEL_FILE_ID;
   }
 
