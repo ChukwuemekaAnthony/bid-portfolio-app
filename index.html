@@ -475,16 +475,33 @@ function App() {
   // ── Excel API calls ──
   async function resolveFileId(t) {
     if (EXCEL_FILE_ID) return EXCEL_FILE_ID;
+    // Search by base name without extension
+    const baseName = EXCEL_FILE_NAME.replace(".xlsx","");
     const resp = await fetch(
-      `https://graph.microsoft.com/v1.0/me/drive/root/search(q='${EXCEL_FILE_NAME}')`,
+      `https://graph.microsoft.com/v1.0/me/drive/root/search(q='${baseName}')`,
       { headers: { Authorization: `Bearer ${t}` } }
     );
     const data = await resp.json();
-    console.log("File search:", data);
-    const file = (data.value || []).find(f => f.name === EXCEL_FILE_NAME);
-    if (!file) throw new Error(`File "${EXCEL_FILE_NAME}" not found in OneDrive`);
+    console.log("File search results:", JSON.stringify((data.value||[]).map(f=>({name:f.name,id:f.id}))));
+    if (data.error) throw new Error("Search error: " + data.error.message);
+    // Match xlsx files containing the base name
+    const file = (data.value || []).find(f =>
+      f.name === EXCEL_FILE_NAME ||
+      f.name === baseName ||
+      f.name.toLowerCase().includes(baseName.toLowerCase())
+    );
+    if (!file) {
+      // List all files as fallback
+      const allResp = await fetch(
+        `https://graph.microsoft.com/v1.0/me/drive/root/children`,
+        { headers: { Authorization: `Bearer ${t}` } }
+      );
+      const allData = await allResp.json();
+      console.log("All root files:", JSON.stringify((allData.value||[]).map(f=>f.name)));
+      throw new Error(`File "${EXCEL_FILE_NAME}" not found. Check console for available files.`);
+    }
     EXCEL_FILE_ID = file.id;
-    console.log("Resolved file ID:", EXCEL_FILE_ID);
+    console.log("Resolved file ID:", EXCEL_FILE_ID, "name:", file.name);
     return EXCEL_FILE_ID;
   }
 
