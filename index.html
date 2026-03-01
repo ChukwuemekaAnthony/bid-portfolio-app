@@ -95,11 +95,17 @@ const CapColor = { OK: "#4BE8A0", OVER: "#E84B7A" };
 
 // ── Helpers ──
 function addWeeks(dateStr, weeks) {
-  const d = new Date(dateStr); d.setDate(d.getDate() + weeks * 7);
+  if (!dateStr) return "";
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return "";
+  d.setDate(d.getDate() + weeks * 7);
   return d.toISOString().slice(0, 10);
 }
 function addMonths(dateStr, months) {
-  const d = new Date(dateStr); d.setMonth(d.getMonth() + months);
+  if (!dateStr) return "";
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime()) || d.getFullYear() < 2000) return "";
+  d.setMonth(d.getMonth() + months);
   return d.toISOString().slice(0, 10);
 }
 function fmtDate(d) {
@@ -179,7 +185,8 @@ function calcBid(bid, allBids, settings) {
   else if (bid.stage === "Lost") goNoGo = "LOST";
   else if (bid.stage === "No-Go") goNoGo = "NO-GO";
 
-  const mobilisationStart = bid.stage === "Won" ? (bid.awardDate || bidEnd) : null;
+  const hasValidAwardDate = bid.awardDate && bid.awardDate.length >= 8 && !isNaN(new Date(bid.awardDate).getTime()) && new Date(bid.awardDate).getFullYear() > 2000;
+  const mobilisationStart = bid.stage === "Won" && hasValidAwardDate ? bid.awardDate : null;
   const goLiveDate = mobilisationStart ? addMonths(mobilisationStart, S.mobilisationMonths) : null;
 
   return { ...bid, bidEnd, totalHours, bidPursuitCost, ev, bidCostPct, overlapCount, capacityStatus, goNoGo, flags, mobilisationStart, goLiveDate };
@@ -370,6 +377,7 @@ function App() {
   const [bids, setBids] = useState([]);
   const [loading, setLoading] = useState(false);
   const [syncStatus, setSyncStatus] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
   const [view, setView] = useState("Dashboard");
   const [selectedBid, setSelectedBid] = useState(null);
   const [filterStage, setFilterStage] = useState("All");
@@ -546,17 +554,15 @@ function App() {
     return EXCEL_FILE_ID;
   }
 
-  async function loadBids(token) {
-    setLoading(true);
+  async function loadBids(token, silent) {
+    if (silent) setRefreshing(true); else setLoading(true);
     try {
       const t = token || await getToken();
       if (!t) return;
       const fileId = await resolveFileId(t);
       const url = `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}/workbook/tables/${EXCEL_TABLE}/rows`;
-      console.log("Loading bids from Excel:", url);
       const resp = await fetch(url, { headers: { Authorization: `Bearer ${t}` } });
       const data = await resp.json();
-      console.log("Load status:", resp.status, data.error || "OK");
       if (!resp.ok) throw new Error(data.error?.message || resp.status);
       const loaded = (data.value || [])
         .map((row, i) => rowToBid(row.values[0], i))
@@ -565,7 +571,10 @@ function App() {
     } catch (e) {
       console.error("Load error:", e);
       setSyncStatus("error");
-    } finally { setLoading(false); }
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
   }
 
   async function appendBid(bid) {
@@ -643,7 +652,7 @@ function App() {
     };
     setBids(prev => [...prev, { ...bid, _rowIndex: prev.length }]);
     await appendBid(bid);
-    await loadBids();
+    await loadBids(null, true);
     setNewBid({
       authority: "", name: "", region: REGIONS[0], stage: "Intake",
       bidStart: new Date().toISOString().slice(0, 10), bidDurationWeeks: 20,
@@ -686,6 +695,13 @@ function App() {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           {syncLabel && <span style={{ fontSize: 11, color: syncColor, fontFamily: "'DM Mono',monospace" }}>{syncLabel}</span>}
+          <button
+            onClick={() => loadBids(null, true)}
+            disabled={refreshing}
+            title="Refresh data from OneDrive"
+            style={{ background: "#1e2435", color: refreshing ? "#4B5563" : "#9CA3AF", border: "none", borderRadius: 6, padding: "5px 11px", fontSize: 15, cursor: refreshing ? "not-allowed" : "pointer", transition: "all 0.2s", lineHeight: 1 }}>
+            <span style={{ display: "inline-block", animation: refreshing ? "spin 0.7s linear infinite" : "none" }}>↻</span>
+          </button>
           {accessToken && (
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               {userInfo && <span style={{ fontSize: 12, color: "#9CA3AF" }}>{userInfo.name}</span>}
