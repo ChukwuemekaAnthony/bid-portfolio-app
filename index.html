@@ -7,7 +7,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
-<script src="https://unpkg.com/@azure/msal-browser@2.38.3/lib/msal-browser.min.js"></script>
+<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js" crossorigin="anonymous"></script>
+<script>if(!window.msal){document.write('<script src="https://unpkg.com/@azure/msal-browser@2.38.3/lib/msal-browser.min.js"><\/script>');}</script>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -37,12 +38,13 @@ const { useState, useMemo, useEffect, useRef, useCallback } = React;
 const MS_CLIENT_ID = "53dc566b-d04e-4dfe-99cd-4713fc786c5a";
 const EXCEL_FILE_NAME = "BidPortfolio.xlsx"; // name of your OneDrive Excel file
 const EXCEL_TABLE = "BidData"; // table name inside the Excel file
+const SETTINGS_TABLE = "AppSettings"; // settings table on the Settings tab
 let EXCEL_FILE_ID = null; // resolved automatically on first load
 // ═══════════════════════════════════════════════════════
 
 // ── MSAL setup ──
-// MSAL is loaded as msalBrowser from unpkg
-const msalLib = window.msalBrowser || window.msal;
+// MSAL global detection - different CDNs expose different globals
+const msalLib = window.msal || window.msalBrowser || window["msal-browser"];
 const msalConfig = {
   auth: {
     clientId: MS_CLIENT_ID,
@@ -68,13 +70,15 @@ const DEFAULT_SETTINGS = {
 };
 
 function loadSettings() {
+  // Used as initial state only — real settings loaded from Excel after login
   try {
     const saved = localStorage.getItem("bidPortfolioSettings");
     return saved ? { ...DEFAULT_SETTINGS, ...JSON.parse(saved) } : { ...DEFAULT_SETTINGS };
   } catch { return { ...DEFAULT_SETTINGS }; }
 }
 
-function saveSettings(s) {
+function cacheSettings(s) {
+  // Cache locally as fallback
   localStorage.setItem("bidPortfolioSettings", JSON.stringify(s));
 }
 
@@ -380,6 +384,9 @@ function App() {
   useEffect(() => {
     // client ID is set
     try {
+      if (!msalLib || !msalLib.PublicClientApplication) {
+        throw new Error("MSAL library not loaded - check CDN");
+      }
       msalRef.current = new msalLib.PublicClientApplication(msalConfig);
       msalRef.current.initialize().then(() => {
         // Handle redirect response
@@ -394,6 +401,14 @@ function App() {
       });
     } catch (e) { console.error("MSAL init error:", e); }
   }, []);
+
+  // Guard: if MSAL didn't load, surface a clear error rather than cryptic TypeError
+  if (!msalLib) {
+    console.error("MSAL library failed to load from CDN");
+    setAuthError("Authentication library failed to load. Please hard-refresh (Ctrl+Shift+R) and try again.");
+    setAuthState("idle");
+    return;
+  }
 
   async function silentLogin(account) {
     try {
@@ -416,6 +431,7 @@ function App() {
       setUserInfo({ name: me.displayName, email: me.mail || me.userPrincipalName });
     } catch (e) { console.log("Profile fetch failed", e); }
     loadBids(token);
+    loadSettingsFromExcel(token);
   }
 
   async function handleSignIn() {
@@ -570,9 +586,10 @@ function App() {
     }
   }
 
-  function handleSaveSettings(s) {
+  async function handleSaveSettings(s) {
     setSettings(s);
-    saveSettings(s);
+    cacheSettings(s);
+    await saveSettingsToExcel(s);
   }
 
   // Computed bids with all calculations
@@ -804,72 +821,101 @@ function App() {
                             <td colSpan={13} style={{ background: "#0d1119", borderBottom: "1px solid #1e2435", padding: 0 }}>
                               <div className="fade-in" style={{ padding: "20px 24px", display: "flex", gap: 28, flexWrap: "wrap" }}>
 
-                                {/* Bid details */}
-                                <div style={{ flex: 1, minWidth: 200 }}>
-                                  <div style={{ fontSize: 10, color: "#9CA3AF", fontFamily: "'DM Mono',monospace", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>Bid Details</div>
-                                  {[["Region", b.region], ["Decision Owner", b.decisionOwner || "—"], ["Compliance", b.compliance], ["Strategic Score", `${b.strategicScore} / 5`], ["Total Bid Hours", `${b.totalHours.toLocaleString()} hrs`], ["Blended Rate", `£${settings.blendedRate}/hr`]].map(([k, v]) => (
-                                    <div key={k} style={{ fontSize: 12, marginBottom: 5 }}>
-                                      <span style={{ color: "#9CA3AF" }}>{k}: </span>
-                                      <span style={{ fontFamily: "'DM Mono',monospace" }}>{v}</span>
+                                {/* Full inline edit form */}
+                                {(() => {
+                                  const [editDraft, setEditDraft] = React.useState({ ...b });
+                                  const [confirmDelete, setConfirmDelete] = React.useState(false);
+                                  const isDirty = JSON.stringify(editDraft) !== JSON.stringify(b);
+
+                                  async function handleSaveEdit(e) {
+                                    e.stopPropagation();
+                                    const updated = {
+                                      ...editDraft,
+                                      contractValue: Number(editDraft.contractValue),
+                                      winProb: Number(editDraft.winProb),
+                                      targetMargin: Number(editDraft.targetMargin),
+                                      bidDurationWeeks: Number(editDraft.bidDurationWeeks),
+                                      strategicScore: Number(editDraft.strategicScore),
+                                    };
+                                    setBids(prev => prev.map(x => x.id === updated.id ? updated : x));
+                                    setSelectedBid(updated);
+                                    await updateBidInExcel(updated);
+                                  }
+
+                                  async function handleDelete(e) {
+                                    e.stopPropagation();
+                                    await deleteBidFromExcel(b);
+                                    setBids(prev => prev.filter(x => x.id !== b.id).map((x, i) => ({ ...x, _rowIndex: i })));
+                                    setSelectedBid(null);
+                                    setConfirmDelete(false);
+                                  }
+
+                                  const fld = (key, label, type, opts) => (
+                                    <div key={key} onClick={e => e.stopPropagation()}>
+                                      <label style={lbl()}>{label}</label>
+                                      {type === "select"
+                                        ? <select value={editDraft[key]} onChange={e => setEditDraft(p => ({ ...p, [key]: e.target.value }))} style={{ ...inp(), fontSize: 12 }}>
+                                            {opts.map(o => <option key={o}>{o}</option>)}
+                                          </select>
+                                        : <input type={type} value={editDraft[key] || ""} onChange={e => setEditDraft(p => ({ ...p, [key]: e.target.value }))} style={{ ...inp(), fontSize: 12 }} />
+                                      }
                                     </div>
-                                  ))}
-                                </div>
+                                  );
 
-                                {/* Inline edit: Stage + Award Date */}
-                                <div style={{ flex: 1, minWidth: 220 }}>
-                                  <div style={{ fontSize: 10, color: "#9CA3AF", fontFamily: "'DM Mono',monospace", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>Update Bid</div>
-                                  <div style={{ marginBottom: 12 }}>
-                                    <label style={lbl()}>Stage</label>
-                                    <select
-                                      value={b.stage}
-                                      onClick={e => e.stopPropagation()}
-                                      onChange={e => {
-                                        const updated = { ...b, stage: e.target.value };
-                                        setBids(prev => prev.map(x => x.id === b.id ? { ...x, stage: e.target.value } : x));
-                                        setSelectedBid(updated);
-                                        updateBidInExcel(updated);
-                                      }}
-                                      style={{ ...inp(), cursor: "pointer" }}>
-                                      {STAGES.map(s => <option key={s}>{s}</option>)}
-                                    </select>
-                                  </div>
-                                  <div style={{ marginBottom: 10 }}>
-                                    <label style={lbl()}>Award Date</label>
-                                    <input
-                                      type="date"
-                                      value={b.awardDate || ""}
-                                      onClick={e => e.stopPropagation()}
-                                      onChange={e => {
-                                        const updated = { ...b, awardDate: e.target.value };
-                                        setBids(prev => prev.map(x => x.id === b.id ? { ...x, awardDate: e.target.value } : x));
-                                        setSelectedBid(updated);
-                                        updateBidInExcel(updated);
-                                      }}
-                                      style={inp()} />
-                                  </div>
-                                  {b.stage === "Won" && b.mobilisationStart && (
-                                    <div style={{ padding: "8px 10px", background: "#111520", borderRadius: 6, border: "1px solid #1e2435" }}>
-                                      <div style={{ fontSize: 11, color: "#4BE8A0", fontFamily: "'DM Mono',monospace", marginBottom: 3 }}>Mob Start: {fmtDate(b.mobilisationStart)}</div>
-                                      <div style={{ fontSize: 11, color: "#4BE8A0", fontFamily: "'DM Mono',monospace" }}>Go-Live: {fmtDate(b.goLiveDate)}</div>
+                                  return (
+                                    <div style={{ width: "100%" }}>
+                                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12, marginBottom: 16 }}>
+                                        {fld("name", "Opportunity Name", "text")}
+                                        {fld("authority", "Authority / Client", "text")}
+                                        {fld("region", "Region", "select", REGIONS)}
+                                        {fld("stage", "Stage", "select", STAGES)}
+                                        {fld("decisionOwner", "Decision Owner", "text")}
+                                        {fld("compliance", "Compliance", "select", COMPLIANCE_OPTS)}
+                                        {fld("bidStart", "Bid Start", "date")}
+                                        {fld("bidDurationWeeks", "Duration (Weeks)", "number")}
+                                        {fld("contractValue", "Contract Value (£)", "number")}
+                                        {fld("winProb", "Win Probability (%)", "number")}
+                                        {fld("targetMargin", "Target Margin (%)", "number")}
+                                        {fld("strategicScore", "Strategic Score (1–5)", "number")}
+                                        {fld("awardDate", "Award Date", "date")}
+                                        {fld("notes", "Notes", "text")}
+                                      </div>
+
+                                      {/* Mobilisation dates if Won */}
+                                      {b.stage === "Won" && b.mobilisationStart && (
+                                        <div style={{ display: "flex", gap: 16, marginBottom: 14, padding: "8px 12px", background: "#111520", borderRadius: 6, border: "1px solid #1e2435" }}>
+                                          <span style={{ fontSize: 11, color: "#4BE8A0", fontFamily: "'DM Mono',monospace" }}>Mob Start: {fmtDate(b.mobilisationStart)}</span>
+                                          <span style={{ fontSize: 11, color: "#4BE8A0", fontFamily: "'DM Mono',monospace" }}>Go-Live: {fmtDate(b.goLiveDate)}</span>
+                                        </div>
+                                      )}
+
+                                      {/* Flags */}
+                                      {b.flags.length > 0 && (
+                                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+                                          {b.flags.map(f => <span key={f} style={{ fontSize: 11, color: "#E8B84B" }}>⚠ {f}</span>)}
+                                        </div>
+                                      )}
+
+                                      {/* Action buttons */}
+                                      <div style={{ display: "flex", gap: 10, alignItems: "center" }} onClick={e => e.stopPropagation()}>
+                                        <button
+                                          onClick={handleSaveEdit}
+                                          disabled={!isDirty}
+                                          style={{ background: isDirty ? "#4B9FE8" : "#1e2435", color: isDirty ? "#fff" : "#4B5563", border: "none", borderRadius: 7, padding: "8px 18px", fontSize: 12, fontWeight: 700, cursor: isDirty ? "pointer" : "not-allowed", transition: "all 0.2s" }}>
+                                          Save Changes
+                                        </button>
+                                        {!confirmDelete
+                                          ? <button onClick={e => { e.stopPropagation(); setConfirmDelete(true); }} style={{ background: "transparent", color: "#E84B7A", border: "1px solid #E84B7A33", borderRadius: 7, padding: "8px 16px", fontSize: 12, cursor: "pointer" }}>Delete Bid</button>
+                                          : <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                                              <span style={{ fontSize: 12, color: "#E84B7A" }}>Confirm delete?</span>
+                                              <button onClick={handleDelete} style={{ background: "#E84B7A", color: "#fff", border: "none", borderRadius: 7, padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Yes, delete</button>
+                                              <button onClick={e => { e.stopPropagation(); setConfirmDelete(false); }} style={{ background: "transparent", color: "#9CA3AF", border: "1px solid #1e2435", borderRadius: 7, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>Cancel</button>
+                                            </div>
+                                        }
+                                      </div>
                                     </div>
-                                  )}
-                                </div>
-
-                                {/* Flags */}
-                                {b.flags.length > 0 && (
-                                  <div style={{ flex: 1, minWidth: 180 }}>
-                                    <div style={{ fontSize: 10, color: "#E8B84B", fontFamily: "'DM Mono',monospace", marginBottom: 10, textTransform: "uppercase", letterSpacing: 1 }}>⚠ Decision Flags</div>
-                                    {b.flags.map(f => <div key={f} style={{ fontSize: 12, color: "#E8B84B", marginBottom: 5 }}>• {f}</div>)}
-                                  </div>
-                                )}
-
-                                {/* Notes */}
-                                {b.notes && (
-                                  <div style={{ flex: 2, minWidth: 180 }}>
-                                    <div style={{ fontSize: 10, color: "#9CA3AF", fontFamily: "'DM Mono',monospace", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>Notes</div>
-                                    <div style={{ fontSize: 13, color: "#9CA3AF", fontStyle: "italic" }}>{b.notes}</div>
-                                  </div>
-                                )}
+                                  );
+                                })()}
 
                               </div>
                             </td>
