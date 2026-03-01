@@ -170,6 +170,7 @@ function calcBid(bid, allBids, settings) {
   const flags = [];
   if (bid.compliance === "Fail") { goNoGo = "NO-GO"; flags.push("Compliance fail"); }
   if (capacityStatus === "OVER") { goNoGo = "NO-GO"; flags.push("Capacity OVER"); }
+  if (ev > 0 && bidPursuitCost >= ev) { goNoGo = "NO-GO"; flags.push(`Pursuit cost £${bidPursuitCost.toLocaleString()} exceeds EV £${ev.toLocaleString()}`); }
   if (bid.targetMargin < S.minMargin) { flags.push(`Margin ${bid.targetMargin}% < ${S.minMargin}%`); if (goNoGo === "GO") goNoGo = "REVIEW"; }
   if (bid.winProb < S.minWinProb) { flags.push(`Win prob ${bid.winProb}% < ${S.minWinProb}%`); if (goNoGo === "GO") goNoGo = "REVIEW"; }
   if (bidCostPct > S.maxBidCostPct) { flags.push(`Bid cost ${bidCostPct.toFixed(1)}% of EV`); if (goNoGo === "GO") goNoGo = "REVIEW"; }
@@ -407,9 +408,13 @@ function App() {
         msalRef.current.handleRedirectPromise().then(resp => {
           if (resp) finishLogin(resp);
           else {
-            // Only auto-resume if user hasn't explicitly signed out
+            // Only auto-resume if:
+            // 1. User hasn't explicitly signed out (localStorage flag)
+            // 2. There was an active session in this browser tab (sessionStorage flag)
+            // sessionStorage clears when the tab closes, preventing cross-tab auto-login
             const signedOut = localStorage.getItem("bidPortfolio_signedOut");
-            if (!signedOut) {
+            const hadSession = sessionStorage.getItem("bidPortfolio_session");
+            if (!signedOut && hadSession) {
               const accounts = msalRef.current.getAllAccounts();
               if (accounts.length > 0) silentLogin(accounts[0]);
             }
@@ -424,6 +429,9 @@ function App() {
     const token = resp.accessToken;
     setAccessToken(token);
     setAuthState("authenticated");
+    // Mark active session — used to gate silent login on refresh
+    sessionStorage.setItem("bidPortfolio_session", "active");
+    localStorage.removeItem("bidPortfolio_signedOut");
     // Get user profile
     try {
       const me = await fetch("https://graph.microsoft.com/v1.0/me", {
@@ -479,24 +487,39 @@ function App() {
     }
   }
 
-  function handleSignOut() {
-    // Wipe MSAL tokens from localStorage manually
-    try {
-      if (msalRef.current) msalRef.current.clearCache();
-    } catch(e) {}
-    // Remove all MSAL keys from localStorage
-    Object.keys(localStorage).forEach(k => {
-      if (k.includes("msal") || k.includes(MS_CLIENT_ID)) {
-        localStorage.removeItem(k);
-      }
-    });
-    // Set explicit signed-out flag so silent login doesn't auto-resume
-    localStorage.setItem("bidPortfolio_signedOut", "true");
-    sessionStorage.clear();
+  async function handleSignOut() {
+    // Clear local state first so UI updates immediately
     setAccessToken(null);
     setUserInfo(null);
     setBids([]);
     setAuthState("idle");
+    // Set flag so we don't auto-resume even if logout popup is blocked
+    sessionStorage.removeItem("bidPortfolio_session");
+    localStorage.setItem("bidPortfolio_signedOut", "true");
+    // Actually end the Microsoft SSO session via popup
+    // This prevents re-auth via M365 browser cookies on refresh
+    try {
+      if (msalRef.current) {
+        const accounts = msalRef.current.getAllAccounts();
+        if (accounts.length > 0) {
+          await msalRef.current.logoutPopup({
+            account: accounts[0],
+            onRedirectNavigate: () => false, // don't redirect the main window
+          });
+        }
+        msalRef.current.clearCache();
+      }
+    } catch(e) {
+      // If popup is blocked or fails, the localStorage flag still prevents auto-login
+      console.log("Logout popup closed or blocked:", e.message);
+    }
+    // Wipe all MSAL keys from storage
+    Object.keys(localStorage).forEach(k => {
+      if (k.includes("msal") || k.includes(MS_CLIENT_ID)) localStorage.removeItem(k);
+    });
+    Object.keys(sessionStorage).forEach(k => {
+      if (k.includes("msal") || k.includes(MS_CLIENT_ID)) sessionStorage.removeItem(k);
+    });
   }
 
   // ── Excel API calls ──
