@@ -7,7 +7,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
-<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
+<script src="https://unpkg.com/@azure/msal-browser@2.38.3/lib/msal-browser.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -41,6 +41,8 @@ let EXCEL_FILE_ID = null; // resolved automatically on first load
 // ═══════════════════════════════════════════════════════
 
 // ── MSAL setup ──
+// MSAL is loaded as msalBrowser from unpkg
+const msalLib = window.msalBrowser || window.msal;
 const msalConfig = {
   auth: {
     clientId: MS_CLIENT_ID,
@@ -378,7 +380,7 @@ function App() {
   useEffect(() => {
     // client ID is set
     try {
-      msalRef.current = new msal.PublicClientApplication(msalConfig);
+      msalRef.current = new msalLib.PublicClientApplication(msalConfig);
       msalRef.current.initialize().then(() => {
         // Handle redirect response
         msalRef.current.handleRedirectPromise().then(resp => {
